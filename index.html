@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Ariel Purchasing</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Navigation is rendered by js/app.js -->
+    <aside id="nav"></aside>
+
+    <div class="wrap">
+      <div class="tb">
+        <label for="vendor-filter">
+          Vendor
+          <select id="vendor-filter"></select>
+        </label>
+
+        <label for="buyer-filter">
+          Buyer
+          <select id="buyer-filter"></select>
+        </label>
+
+        <span class="sub" id="meta"></span>
+      </div>
+
+      <!-- Active view is rendered by js/app.js -->
+      <main id="main"></main>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

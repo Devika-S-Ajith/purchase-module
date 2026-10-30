@@ -1,0 +1,562 @@
+/* ==========================================================================
+   Ariel Purchasing Module — stylesheet
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Design tokens
+   -------------------------------------------------------------------------- */
+:root {
+  --bg: #f2f5f9;
+  --card: #ffffff;
+  --ink: #142033;
+  --mut: #5b6678;
+  --line: #e1e6ee;
+  --acc: #0f6b6f;
+  --accfg: #ffffff;
+  --okbg: #ddf3e4;
+  --okfg: #14532d;
+  --badbg: #fadadd;
+  --badfg: #8b1a1a;
+  --wbg: #fff1d6;
+  --wfg: #7a4b00;
+
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c1522;
+    --card: #142033;
+    --ink: #e8eef7;
+    --mut: #9fb0c6;
+    --line: #25344b;
+    --acc: #4fc3c8;
+    --accfg: #06282b;
+    --okbg: #17382a;
+    --okfg: #9ae2b4;
+    --badbg: #4a2124;
+    --badfg: #f5a9a4;
+    --wbg: #44350f;
+    --wfg: #f2cd7a;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0c1522;
+  --card: #142033;
+  --ink: #e8eef7;
+  --mut: #9fb0c6;
+  --line: #25344b;
+  --acc: #4fc3c8;
+  --accfg: #06282b;
+  --okbg: #17382a;
+  --okfg: #9ae2b4;
+  --badbg: #4a2124;
+  --badfg: #f5a9a4;
+  --wbg: #44350f;
+  --wfg: #f2cd7a;
+  color-scheme: dark;
+}
+
+/* --------------------------------------------------------------------------
+   Base
+   -------------------------------------------------------------------------- */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-padding-top: env(safe-area-inset-top, 0px);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.45 Inter, Arial, sans-serif;
+}
+
+.mono {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Application shell
+   -------------------------------------------------------------------------- */
+.app {
+  display: grid;
+  grid-template-columns: 232px 1fr;
+  min-height: 100vh;
+}
+
+/* Sidebar ---------------------------------------------------------------- */
+aside {
+  background: #0e1a2b;
+  color: #c9d4e5;
+  padding: 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow: auto;
+}
+
+.brand {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 0 6px 14px;
+}
+
+.brand span {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: #4fc3c8;
+  color: #06282b;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+}
+
+.brand b {
+  color: #ffffff;
+  font-size: 16px;
+  display: block;
+}
+
+.brand small {
+  color: #8fa3bd;
+  font-size: 11px;
+}
+
+aside h4 {
+  margin: 16px 8px 6px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: #6f86a3;
+}
+
+aside a {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #c9d4e5;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+aside a.on {
+  background: #4fc3c8;
+  color: #06282b;
+  font-weight: 700;
+}
+
+aside a.dis {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.sp {
+  flex: 1;
+}
+
+.bd {
+  background: #e5534b;
+  color: #ffffff;
+  border-radius: 99px;
+  font-size: 11px;
+  padding: 1px 8px;
+  font-weight: 700;
+}
+
+/* Main column ------------------------------------------------------------ */
+.wrap {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Top toolbar ------------------------------------------------------------ */
+.tb {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  padding: 12px 24px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: env(safe-area-inset-top, 0px);
+  z-index: 5;
+}
+
+.tb label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--mut);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+select,
+input[type="search"] {
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+}
+
+main {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Typography and layout helpers
+   -------------------------------------------------------------------------- */
+h1 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.sub {
+  font-size: 12px;
+  color: var(--mut);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  min-width: 0;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.two {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 14px;
+}
+
+/* KPI cards -------------------------------------------------------------- */
+.kp {
+  cursor: pointer;
+}
+
+.kp b {
+  font-size: 26px;
+  display: block;
+}
+
+.kp.hot {
+  border-color: #e5534b;
+}
+
+.kp.hot b {
+  color: #e5534b;
+}
+
+/* Pipeline bar ----------------------------------------------------------- */
+.pipe {
+  display: flex;
+  height: 26px;
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 10px 0;
+}
+
+.pipe span {
+  display: block;
+  height: 100%;
+}
+
+.lg {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.lg i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 6px;
+}
+
+/* Tables ----------------------------------------------------------------- */
+.sc {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 640px;
+}
+
+th {
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--mut);
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+tr.lk {
+  cursor: pointer;
+}
+
+tr.lk:hover td {
+  background: var(--bg);
+}
+
+tr.sub2 td {
+  background: var(--bg);
+}
+
+.n {
+  text-align: right;
+}
+
+/* Status tags ------------------------------------------------------------ */
+.tag {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--line);
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.ok {
+  background: var(--okbg);
+  color: var(--okfg);
+}
+
+.bad {
+  background: var(--badbg);
+  color: var(--badfg);
+}
+
+.wn {
+  background: var(--wbg);
+  color: var(--wfg);
+}
+
+/* Buttons ---------------------------------------------------------------- */
+button {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--acc);
+  background: transparent;
+  color: var(--acc);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.p {
+  background: var(--acc);
+  color: var(--accfg);
+}
+
+button.s {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Container planner
+   -------------------------------------------------------------------------- */
+.cols {
+  display: grid;
+  grid-template-columns: minmax(260px, 330px) 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.ctns {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 12px;
+}
+
+.zone {
+  border: 2px dashed var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  max-height: 230px;
+  overflow: auto;
+  margin-top: 8px;
+  min-height: 60px;
+}
+
+.zone.big {
+  max-height: 75vh;
+}
+
+.zone.hot {
+  border-color: var(--acc);
+}
+
+.zone.lock {
+  border-style: solid;
+  opacity: 0.85;
+}
+
+.gh {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--acc);
+  margin: 8px 2px 2px;
+}
+
+.blk {
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-top: 5px;
+  cursor: grab;
+  font-size: 12px;
+}
+
+.blk.sel {
+  outline: 2px solid var(--acc);
+}
+
+.blk.l2 {
+  cursor: default;
+  background: var(--bg);
+}
+
+/* Capacity bar ----------------------------------------------------------- */
+.bar {
+  height: 8px;
+  background: var(--line);
+  border-radius: 99px;
+  margin: 6px 0 2px;
+}
+
+.bar i {
+  display: block;
+  height: 100%;
+  background: var(--acc);
+  border-radius: 99px;
+}
+
+.bar i.r {
+  background: #c62828;
+}
+
+/* --------------------------------------------------------------------------
+   Toast
+   -------------------------------------------------------------------------- */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--bg);
+  padding: 10px 18px;
+  border-radius: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+  z-index: 9;
+}
+
+#toast.on {
+  opacity: 1;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive
+   -------------------------------------------------------------------------- */
+@media (max-width: 820px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  aside {
+    position: static;
+    height: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    align-items: center;
+  }
+
+  aside h4,
+  .brand small,
+  .sp {
+    display: none;
+  }
+
+  aside a {
+    white-space: nowrap;
+  }
+
+  .cols {
+    grid-template-columns: 1fr;
+  }
+
+  main {
+    padding: 14px;
+  }
+
+  .tb {
+    padding: 10px 14px;
+  }
+}
