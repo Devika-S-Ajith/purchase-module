@@ -59,7 +59,7 @@
   const RECEIPT_STATUS_LABELS = {
     'Received': 'Received',
     'In transit': 'On the way',
-    'Overdue': 'Late',
+    'Overdue': 'Past ETA',
     'No ETA': 'No ETA',
     'Unmatched': 'No matching PO',
     'Invalid data': 'Invalid data',
@@ -266,7 +266,7 @@
   }
 
   function renderStatusTag(status) {
-    return renderTag(tagVariantForStatus(status), status);
+    return renderTag(tagVariantForStatus(status), status === 'Overdue' ? 'Past ETA' : status);
   }
 
   function wrapperLabel(vendorId) {
@@ -421,7 +421,10 @@
   }
 
   function poIsAtRisk(po, summary) {
-    return summary.balance > 0 && !poHasOpenReceipt(po) && unplannedUnitsForPo(po) > 0;
+    return summary.balance > 0
+      && !poHasOpenReceipt(po)
+      && unplannedUnitsForPo(po) > 0
+      && (summary.ageDays > 90 || summary.receivedReceipts.length > 0);
   }
 
   function lineStatus(line) {
@@ -577,7 +580,8 @@
       if (query && !poSearchText(po).includes(query)) return;
 
       const summary = getPoSummary(po);
-      if (status && summary.status !== status) return;
+      if (status === 'All open' && summary.balance <= 0) return;
+      if (status && status !== 'All open' && summary.status !== status) return;
       rows.push({ po, summary });
     });
 
@@ -722,46 +726,60 @@
 
   function renderHome() {
     const rows = dashboardOrders();
-    const summaries = rows.map((row) => row.summary);
-
+    const end14 = addDays(AS_OF, 14);
     const totals = {
       openPos: 0,
       openValue: 0,
       inTransit: 0,
-      pastEta: 0,
       arriving14: 0,
-      nothingComing: 0,
-      openCbm: 0,
-      missingCbmLines: 0,
+      atRiskPos: 0,
+      pastEtaPos: 0,
+      unshippedPos: 0,
       orderedUnits: 0,
       receivedUnits: 0,
       inTransitUnits: 0,
       plannedUnits: 0,
+      notYetPlannedUnits: 0,
       atRiskUnits: 0,
-      atRiskPos: 0,
     };
-
-    const end14 = addDays(AS_OF, 14);
-    const statusCounts = {
-      Received: 0,
-      'In transit': 0,
-      'Not shipped yet': 0,
-      Overdue: 0,
-      'Unshipped balance': 0,
-    };
+    const needsAction = [];
+    const upcoming = [];
 
     rows.forEach(({ po, summary }) => {
-      if (summary.balance > 0) totals.openPos += 1;
-      totals.openValue += summary.openValue;
-      if (summary.status === 'In transit') totals.inTransit += 1;
-      if (summary.status === 'Overdue') totals.pastEta += 1;
-      if (summary.status === 'Unshipped balance') totals.nothingComing += 1;
-      if (summary.nextEta && summary.nextEta >= AS_OF && summary.nextEta <= end14) totals.arriving14 += 1;
-      totals.openCbm += summary.openCbm;
-      totals.missingCbmLines += summary.missingCbmOpen;
-
       const hasOpenReceipt = poHasOpenReceipt(po);
-      if (!hasOpenReceipt && poIsAtRisk(po, summary)) totals.atRiskPos += 1;
+      const atRisk = poIsAtRisk(po, summary);
+      if (summary.balance > 0) {
+        totals.openPos += 1;
+        totals.openValue += summary.openValue;
+      }
+      if (summary.openReceipts.some((receipt) => receipt.etaDate && receipt.etaDate >= AS_OF)) {
+        totals.inTransit += 1;
+      }
+      if (summary.nextEta && summary.nextEta >= AS_OF && summary.nextEta <= end14) {
+        totals.arriving14 += 1;
+      }
+      if (atRisk) totals.atRiskPos += 1;
+      if (summary.status === 'Overdue') totals.pastEtaPos += 1;
+      if (summary.status === 'Unshipped balance') totals.unshippedPos += 1;
+
+      let actionReason = '';
+      let priority = 0;
+      if (atRisk) {
+        actionReason = 'At risk';
+      } else if (summary.status === 'Overdue') {
+        actionReason = 'Past ETA';
+        priority = 1;
+      } else if (summary.status === 'Unshipped balance') {
+        actionReason = 'Unshipped balance';
+        priority = 2;
+      }
+      if (actionReason) needsAction.push({ po, summary, reason: actionReason, priority });
+
+      po.receipts.forEach((receipt) => {
+        if (receipt.invalid || isReceiptReceived(receipt) || !receipt.etaDate) return;
+        upcoming.push({ receipt, po });
+      });
+
       po.lines.forEach((line) => {
         if (line.isCheckData) return;
         const open = openUnitsForLine(line);
@@ -770,263 +788,186 @@
         if (open <= 0) return;
         if (hasOpenReceipt) {
           totals.inTransitUnits += open;
-        } else {
-          const shipped = Math.min(shippedUnitsForLine(line), open);
-          const planned = Math.min(plannedUnitsForLine(line), Math.max(0, open - shipped));
-          totals.inTransitUnits += shipped;
-          totals.plannedUnits += planned;
-          totals.atRiskUnits += Math.max(0, open - shipped - planned);
+          return;
         }
-      });
-
-      if (statusCounts[summary.status] != null) {
-        statusCounts[summary.status] += 1;
-      } else if (summary.status === 'Partly received') {
-        statusCounts['Not shipped yet'] += 1;
-      }
-    });
-
-    const statusGroups = [
-      ['Received', 'Received', '#5b8f4a'],
-      ['In transit', 'In transit', '#3b82c4'],
-      ['Not shipped yet', 'Not shipped yet', '#e0a030'],
-      ['Overdue', 'Overdue', '#e5534b'],
-      ['Unshipped balance', 'Unshipped balance', '#8b1a1a'],
-    ];
-    const statusTotal = Object.values(statusCounts).reduce((sum, value) => sum + value, 0) || 1;
-
-    const upcoming = [];
-    rows.forEach(({ po }) => {
-      po.receipts.forEach((receipt) => {
-        if (receipt.invalid || isReceiptReceived(receipt)) return;
-        if (!receipt.etaDate || receipt.etaDate < AS_OF) return;
-        upcoming.push({ receipt, po });
+        const shipped = Math.min(shippedUnitsForLine(line), open);
+        const planned = Math.min(plannedUnitsForLine(line), Math.max(0, open - shipped));
+        const remainingUnplanned = Math.max(0, open - shipped - planned);
+        const riskUnits = atRisk ? remainingUnplanned : 0;
+        totals.inTransitUnits += shipped;
+        totals.plannedUnits += planned;
+        totals.atRiskUnits += riskUnits;
+        totals.notYetPlannedUnits += remainingUnplanned - riskUnits;
       });
     });
+
+    needsAction.sort((a, b) =>
+      a.priority - b.priority
+      || (b.summary.ageDays ?? -1) - (a.summary.ageDays ?? -1)
+      || a.po.po.localeCompare(b.po.po)
+    );
     upcoming.sort((a, b) => a.receipt.etaDate.localeCompare(b.receipt.etaDate));
-    const nextEtaRows = upcoming.slice(0, 8);
+    const nextEtaRows = upcoming.slice(0, 5);
+    const topActionRows = needsAction.slice(0, 5);
 
     const vendorMap = new Map();
     rows.forEach(({ po, summary }) => {
       const key = po.vendorId || '(blank)';
-      const row = vendorMap.get(key) || {
+      const vendor = vendorMap.get(key) || {
         vendor: key,
-        poCount: 0,
         openValue: 0,
         ordered: 0,
         received: 0,
-        overdue: 0,
+        needsAction: 0,
         nextEta: '',
       };
-      row.poCount += 1;
-      row.openValue += summary.openValue;
-      row.ordered += summary.countedOrdered;
-      row.received += summary.received;
-      if (summary.status === 'Overdue') row.overdue += 1;
-      if (summary.nextEta && (!row.nextEta || summary.nextEta < row.nextEta)) row.nextEta = summary.nextEta;
-      vendorMap.set(key, row);
+      vendor.openValue += summary.openValue;
+      vendor.ordered += summary.countedOrdered;
+      vendor.received += summary.received;
+      if (poIsAtRisk(po, summary) || summary.status === 'Overdue' || summary.status === 'Unshipped balance') {
+        vendor.needsAction += 1;
+      }
+      if (summary.nextEta && (!vendor.nextEta || summary.nextEta < vendor.nextEta)) vendor.nextEta = summary.nextEta;
+      vendorMap.set(key, vendor);
     });
+    const vendors = Array.from(vendorMap.values())
+      .sort((a, b) => b.openValue - a.openValue || a.vendor.localeCompare(b.vendor))
+      .slice(0, 8);
 
-    const vendors = Array.from(vendorMap.values()).sort((a, b) => b.openValue - a.openValue);
-    const vendorTotals = vendors.reduce((totalsRow, row) => {
-      totalsRow.poCount += row.poCount;
-      totalsRow.openValue += row.openValue;
-      totalsRow.ordered += row.ordered;
-      totalsRow.received += row.received;
-      totalsRow.overdue += row.overdue;
-      if (row.nextEta && (!totalsRow.nextEta || row.nextEta < totalsRow.nextEta)) totalsRow.nextEta = row.nextEta;
-      return totalsRow;
-    }, { poCount: 0, openValue: 0, ordered: 0, received: 0, overdue: 0, nextEta: '' });
-
-    const receiptMatches = HEALTH.counts.matchedReceipts;
-    const receiptTotal = HEALTH.counts.receipts;
-
-    const coverageTotal =
-      totals.receivedUnits + totals.inTransitUnits + totals.plannedUnits + totals.atRiskUnits;
+    const coverageTotal = totals.orderedUnits;
     const coveragePct = (value) => (coverageTotal ? (value / coverageTotal) * 100 : 0);
     const coverage = [
-      ['Received', totals.receivedUnits, '#5b8f4a', 'Received in the export, via a simulated receipt or an arrived container'],
-      ['In transit', totals.inTransitUnits, '#3b82c4', 'Open balance covered by an open receipt or a shipped container'],
-      ['Planned', totals.plannedUnits, '#0f6b6f', 'Assigned to a draft or booked container in the Planner'],
-      ['At risk', totals.atRiskUnits, '#e5534b', 'Open balance with no receipt and some balance neither shipped nor planned'],
+      ['Received', totals.receivedUnits, '#5b8f4a'],
+      ['In transit', totals.inTransitUnits, '#3b82c4'],
+      ['Planned', totals.plannedUnits, '#e0a030'],
+      ['Not yet planned', totals.notYetPlannedUnits, '#aeb7c2'],
+      ['At risk', totals.atRiskUnits, '#e5534b'],
     ];
+    const needsActionCount = new Set(needsAction.map((row) => row.po.po)).size;
+    const unplannedOpenUnits = totals.notYetPlannedUnits + totals.atRiskUnits;
+    const orderedPct = totals.orderedUnits ? Math.round((unplannedOpenUnits / totals.orderedUnits) * 100) : 0;
+    const openValueLabel = `$${(totals.openValue / 1e6).toFixed(2)}M open value`;
+    const coverageExplanation = 'Received is ordered minus current balance. In transit includes open receipts and shipped containers. Planned includes draft/booked containers. The remaining open units are split between Not yet planned and At risk; check-data lines are excluded.';
 
     return `
-      ${renderHeader(
-        'Purchasing dashboard',
-        `${formatNumber(rows.length)} POs in the current segment · ${formatNumber(rows.reduce((sum, row) => sum + row.summary.lineCount, 0))} lines · data as of ${AS_OF_LABEL}`,
-        `<div class="sub">${SEGMENT_LABELS[state.segmentFilter] || 'All segments'}</div>`
-      )}
+      <div class="dashboard">
+        <div class="row dashboard-title"><h1>Purchasing dashboard</h1></div>
 
-      <div class="grid">
-        ${renderMetricCard(formatNumber(totals.openPos), 'Open POs', 'orders')}
-        ${renderMetricCard(formatValue(totals.openValue), 'Open PO value', 'orders')}
-        ${renderMetricCard(formatNumber(totals.inTransit), 'In transit', 'shipments', false, 'Open receipts or shipped containers')}
-        ${renderMetricCard(formatNumber(totals.pastEta), 'Past ETA', 'followup', totals.pastEta > 0)}
-        ${renderMetricCard(formatNumber(totals.arriving14), 'Arriving in 14 days', 'shipments')}
-        ${renderMetricCard(formatNumber(totals.nothingComing), 'Unshipped balance', 'followup', totals.nothingComing > 0)}
-        ${renderMetricCard(
-          `${formatCbm(totals.openCbm)}`,
-          'Open CBM',
-          'orders',
-          false,
-          `${formatNumber(totals.missingCbmLines)} open import line${totals.missingCbmLines === 1 ? '' : 's'} with CBM missing`
-        )}
-        ${renderMetricCard(
-          formatNumber(totals.plannedUnits),
-          'Planned units',
-          'planner',
-          false,
-          'Open balance in draft or booked containers'
-        )}
-        ${renderMetricCard(
-          formatNumber(totals.atRiskUnits),
-          'At risk units',
-          'followup',
-          totals.atRiskUnits > 0,
-          `${formatNumber(totals.atRiskPos)} POs with no receipt and some balance neither shipped nor planned`
-        )}
-      </div>
+        <div class="grid home-kpis">
+          <button class="card kp" data-action="open-open-orders">
+            <b>${formatNumber(totals.openPos)}</b>
+            <span class="sub">Open POs</span>
+            <span class="sub">${esc(openValueLabel)}</span>
+          </button>
+          <button class="card kp" data-action="ship-on-way">
+            <b>${formatNumber(totals.inTransit)}</b>
+            <span class="sub">In transit</span>
+            <span class="sub">${formatNumber(totals.arriving14)} arriving in 14 days</span>
+          </button>
+          <button class="card kp${needsActionCount > 0 ? ' hot' : ''}" data-action="go:followup">
+            <b>${formatNumber(needsActionCount)}</b>
+            <span class="sub">Needs action</span>
+            <span class="sub">${formatNumber(totals.atRiskPos)} at risk · ${formatNumber(totals.pastEtaPos)} past ETA · ${formatNumber(totals.unshippedPos)} unshipped balance</span>
+          </button>
+          <button class="card kp neutral" data-action="go:planner">
+            <b>${formatNumber(unplannedOpenUnits)}</b>
+            <span class="sub">Not yet planned</span>
+            <span class="sub">${orderedPct}% of ordered units</span>
+          </button>
+        </div>
 
-      <div class="card">
-        <div class="row">
-          <div>
-            <h2>Order coverage</h2>
-            <div class="sub">What has happened to every ordered unit in the current segment.</div>
-          </div>
-          <span class="sub"><b>${formatNumber(totals.orderedUnits)}</b> ordered units</span>
-        </div>
-        <div class="pipe">
-          ${coverage.map(([label, value, colour]) => value > 0
-            ? `<span style="width:${coveragePct(value)}%;background:${colour}" title="${attr(label)}: ${formatNumber(value)} units"></span>`
-            : '').join('')}
-        </div>
-        <div class="lg">
-          ${coverage.map(([label, value, colour, note]) => `
-            <span title="${attr(note)}">
-              <i style="background:${colour}"></i>${esc(label)}
-              <b>${formatNumber(value)}</b>
-              <span class="sub">${coverageTotal ? `${Math.round(coveragePct(value))}%` : '0%'}</span>
-            </span>`).join('')}
-        </div>
-        <div class="sub" style="margin-top:10px">
-          Received is derived as ordered − balance in the export, plus simulated receipts and arrived containers. In transit includes open receipts and containers marked Shipped. Planned is the remaining open balance in draft or booked containers; at risk is the part neither shipped nor planned. Check-data lines are excluded.
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="row">
-          <h2>PO status split</h2>
-          <span class="sub">${formatNumber(rows.length)} POs</span>
-        </div>
-        <div class="status-bars">
-          ${statusGroups.map(([key, label, colour]) => {
-            const count = statusCounts[key];
-            const pct = statusTotal ? (count / statusTotal) * 100 : 0;
-            return `
-              <div class="status-bar-row">
-                <div class="status-bar-head">
-                  <span><i style="background:${colour}"></i>${esc(label)}</span>
-                  <span class="sub"><b>${formatNumber(count)}</b> · ${Math.round(pct)}%</span>
-                </div>
-                <div class="status-bar-track">
-                  <span class="status-bar-fill" style="width:${pct}%;min-width:${count ? '2px' : '0'};background:${colour}"></span>
-                </div>
-              </div>`;
-          }).join('')}
-        </div>
-        <div class="sub" style="margin-top:8px">Partly received POs are grouped under “Not shipped yet” in this chart. “Unshipped balance” means some goods were received, a balance remains, and no receipt is still open. The Order coverage bar above splits the remaining balance into in transit from shipped containers, planned and at risk.</div>
-      </div>
-
-      <div class="two">
-        <div class="card">
+        <section class="card coverage-card">
           <div class="row">
-            <h2>Upcoming ETAs</h2>
-            <button class="s" data-action="go:shipments">Open shipments</button>
+            <h2>Order coverage <span class="info-icon" tabindex="0" title="${attr(coverageExplanation)}" aria-label="Order coverage definition">i</span></h2>
+            <span class="sub"><b>${formatNumber(totals.orderedUnits)}</b> ordered units</span>
           </div>
-          ${nextEtaRows.length ? `
-            <div class="sc">
-              <table style="min-width:420px">
-                <thead>
+          <div class="pipe" role="img" aria-label="Order coverage split across five segments">
+            ${coverage.map(([label, value, colour]) => value > 0
+              ? `<span style="width:${coveragePct(value)}%;background:${colour}" title="${attr(label)}: ${formatNumber(value)} units"></span>`
+              : '').join('')}
+          </div>
+          <div class="coverage-legend">
+            ${coverage.map(([label, value, colour]) => `
+              <span><i style="background:${colour}"></i>${esc(label)} <b>${formatNumber(value)}</b> <span class="sub">${coveragePct(value).toFixed(1)}%</span></span>`).join('')}
+          </div>
+        </section>
+
+        <div class="two dashboard-columns">
+          <section class="card dashboard-list">
+            <div class="row section-head">
+              <h2>Needs action</h2>
+              <button class="s" data-action="go:followup">View all ${formatNumber(needsActionCount)}</button>
+            </div>
+            ${topActionRows.length ? `
+              <div class="sc">
+                <table class="dashboard-table">
+                  <thead><tr><th>PO / vendor</th><th>Reason</th><th class="n">Open value</th><th class="n">Age / late</th></tr></thead>
+                  <tbody>
+                    ${topActionRows.map(({ po, summary, reason }) => {
+                      const lateDays = reason === 'Past ETA' && summary.nextEta ? daysLate(summary.nextEta) : null;
+                      const age = summary.ageDays == null ? '—' : `${formatNumber(summary.ageDays)} days old`;
+                      const ageLabel = lateDays != null && lateDays > 0 ? `${formatNumber(lateDays)} days late` : age;
+                      const variant = reason === 'At risk' || reason === 'Past ETA' ? 'bad' : 'wn';
+                      return `<tr class="lk" data-action="openpo:${attr(po.po)}">
+                        <td><b>${esc(po.po)}</b><span class="sub">${esc(po.vendorId || '—')}</span></td>
+                        <td>${renderTag(variant, reason)}</td>
+                        <td class="n">$${formatValue(summary.openValue)}</td>
+                        <td class="n">${esc(ageLabel)}</td>
+                      </tr>`;
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>` : '<div class="empty-state">Nothing needs action</div>'}
+          </section>
+
+          <section class="card dashboard-list">
+            <div class="row section-head">
+              <h2>Upcoming ETAs</h2>
+              <button class="s" data-action="shipments-all">Open shipments</button>
+            </div>
+            ${nextEtaRows.length ? `
+              <div class="sc">
+                <table class="dashboard-table eta-table">
+                  <thead><tr><th>ETA</th><th>Tracking</th><th>PO / vendor</th><th>Type</th></tr></thead>
+                  <tbody>
+                    ${nextEtaRows.map(({ receipt, po }) => {
+                      const late = daysLate(receipt.etaDate);
+                      const etaText = late > 0 ? renderTag('bad', `${formatNumber(late)} days late`) : esc(relativeEta(receipt.etaDate));
+                      return `<tr class="lk" data-action="openpo:${attr(po.po)}">
+                        <td><b>${formatDate(receipt.etaDate)}</b><span class="sub">${etaText}</span></td>
+                        <td class="mono">${esc(receipt.tracking || '—')}</td>
+                        <td><b>${esc(po.po)}</b><span class="sub">${esc(po.vendorId || '—')}</span></td>
+                        <td>${esc(receipt.type || '—')}</td>
+                      </tr>`;
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>` : '<div class="empty-state">No open receipts with an ETA</div>'}
+          </section>
+        </div>
+
+        <section class="card vendors-card">
+          <div class="row section-head">
+            <h2>Top 8 vendors</h2>
+            <button class="s" data-action="vendors-all">View all vendors</button>
+          </div>
+          <div class="sc">
+            <table class="dashboard-table vendors-table">
+              <thead><tr><th>Vendor</th><th class="n">Open value</th><th class="n">Received %</th><th class="n">Needs action</th><th>Next ETA</th></tr></thead>
+              <tbody>
+                ${vendors.map((vendor) => `
                   <tr>
-                    <th>ETA</th>
-                    <th>TRACKING</th>
-                    <th>VENDOR / PO</th>
-                    <th>TYPE</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${nextEtaRows.map(({ receipt, po }) => `
-                    <tr class="lk" data-action="openpo:${esc(po.po)}">
-                      <td><b>${formatDate(receipt.etaDate)}</b><br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span></td>
-                      <td class="mono">${esc(receipt.tracking || '—')}</td>
-                      <td><b>${esc(po.po)}</b><br><span class="sub">${esc(po.vendorId || '—')}</span></td>
-                      <td>${renderReceiptStatusTag(receipt)}<br><span class="sub">${esc(receipt.type || '—')}</span></td>
-                    </tr>
-                  `).join('')}
-                </tbody>
-              </table>
-            </div>` : '<div class="sub">No open receipts with a future ETA in this segment.</div>'}
-        </div>
-
-        <div class="card">
-          <div class="row">
-            <h2>Receipt coverage</h2>
-            <button class="s" data-action="go:shipments">View receipts</button>
+                    <td><b>${esc(vendor.vendor)}</b></td>
+                    <td class="n">$${formatValue(vendor.openValue)}</td>
+                    <td class="n">${vendor.ordered ? `${Math.round((vendor.received / vendor.ordered) * 100)}%` : '—'}</td>
+                    <td class="n">${formatNumber(vendor.needsAction)}</td>
+                    <td>${vendor.nextEta ? `<b>${formatDate(vendor.nextEta)}</b><span class="sub">${esc(relativeEta(vendor.nextEta))}</span>` : '—'}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
           </div>
-          <div class="grid" style="grid-template-columns:repeat(2,minmax(130px,1fr))">
-            <div><b>${formatNumber(receiptMatches)}</b><div class="sub">matched receipts</div></div>
-            <div><b>${formatNumber(receiptTotal - receiptMatches)}</b><div class="sub">unmatched / invalid</div></div>
-            <div><b>${formatNumber(HEALTH.counts.headerOnlyPos)}</b><div class="sub">header-only POs</div></div>
-            <div><b>${formatNumber(HEALTH.counts.detailOnlyPos)}</b><div class="sub">PO headers missing</div></div>
-          </div>
-          <div class="sub" style="margin-top:10px">${formatNumber(HEALTH.importMissingCbm)} of ${formatNumber(HEALTH.importLines)} import lines (${HEALTH.importMissingCbmPct}%) have no CBM. Open CBM excludes those lines.</div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="row">
-          <h2>Vendors</h2>
-          <span class="sub">Open value, received %, overdue POs and next ETA</span>
-        </div>
-        <div class="sc">
-          <table>
-            <thead>
-              <tr>
-                <th>VENDOR</th>
-                <th class="n">POs</th>
-                <th class="n">OPEN PO VALUE</th>
-                <th class="n">RECEIVED %</th>
-                <th class="n">OVERDUE POs</th>
-                <th>NEXT ETA</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${vendors.map((vendor) => `
-                <tr>
-                  <td><b>${esc(vendor.vendor)}</b></td>
-                  <td class="n">${formatNumber(vendor.poCount)}</td>
-                  <td class="n">${formatValue(vendor.openValue)}</td>
-                  <td class="n">${vendor.ordered ? `${Math.round((vendor.received / vendor.ordered) * 100)}%` : '—'}</td>
-                  <td class="n">${vendor.overdue ? `<span class="tag bad">${vendor.overdue}</span>` : '0'}</td>
-                  <td>${vendor.nextEta ? `<b>${formatDate(vendor.nextEta)}</b><br><span class="sub">${esc(relativeEta(vendor.nextEta))}</span>` : '<span class="sub">—</span>'}</td>
-                </tr>
-              `).join('')}
-              <tr class="total-row">
-                <td><b>Total</b></td>
-                <td class="n"><b>${formatNumber(vendorTotals.poCount)}</b></td>
-                <td class="n"><b>${formatValue(vendorTotals.openValue)}</b></td>
-                <td class="n"><b>${vendorTotals.ordered ? `${Math.round((vendorTotals.received / vendorTotals.ordered) * 100)}%` : '—'}</b></td>
-                <td class="n"><b>${formatNumber(vendorTotals.overdue)}</b></td>
-                <td><b>${vendorTotals.nextEta ? formatDate(vendorTotals.nextEta) : '—'}</b></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      ${renderCoverageNote()}
-    `;
+        </section>
+      </div>`;
   }
 
   /* =========================================================================
@@ -1038,8 +979,8 @@
       .map((port) => `<option value="${attr(port)}"${state.portFilter === port ? ' selected' : ''}>${esc(port)}</option>`)
       .join('');
 
-    const statusOptions = PO_STATUSES
-      .map((status) => `<option value="${attr(status)}"${state.statusFilter === status ? ' selected' : ''}>${esc(status)}</option>`)
+    const statusOptions = ['All open', ...PO_STATUSES]
+      .map((status) => `<option value="${attr(status)}"${state.statusFilter === status ? ' selected' : ''}>${esc(status === 'Overdue' ? 'Past ETA' : status)}</option>`)
       .join('');
 
     return `
@@ -1132,8 +1073,8 @@
         title="Open Follow-ups to see balances with no receipt and some balance not planned"
       >
         <b>${formatNumber(riskCount)}</b>
-        <span class="sub">Unplanned balance</span>
-        <span class="sub">POs with no open receipt and some balance not planned</span>
+        <span class="sub">At risk</span>
+        <span class="sub">No open receipt; unplanned and over 90 days old or previously received</span>
       </button>`;
   }
 
@@ -1222,8 +1163,10 @@
     if (po.synthetic) tags.push(renderTag('bad', 'PO header missing', 'This detail PO has no row in PurchPO. Vendor was inferred from the PO number.'));
     if (summary.old) tags.push(renderTag('wn', 'Old', 'Not shipped yet and PO age is over 90 days'));
     if (shipped > 0) tags.push(renderTag('info', 'In container', 'Some or all open units are on a container marked Shipped.'));
-    if (summary.balance > 0 && !hasOpenReceipt && unplanned > 0) {
-      tags.push(renderTag('bad', 'Unplanned balance', 'Open balance is not covered by an open receipt, a shipped container or a container plan.'));
+    if (summary.balance > 0 && !hasOpenReceipt && unplanned > 0 && poIsAtRisk(po, summary)) {
+      tags.push(renderTag('bad', 'At risk', 'Unplanned open balance on a PO over 90 days old or with a received receipt.'));
+    } else if (summary.balance > 0 && !hasOpenReceipt && unplanned > 0) {
+      tags.push(renderTag('', 'Not yet planned', 'Young PO balance that is not yet planned for shipment.'));
     } else if (summary.balance > 0 && !hasOpenReceipt && planned > 0 && unplanned <= 0) {
       tags.push(renderTag('ok', 'Planned', 'All remaining open balance is assigned in the Planner.'));
     }
@@ -1442,7 +1385,7 @@
     const cards = [
       ['', 'Receipts in view', `${formatNumber(received)} already received`, false, total],
       ['In transit', 'On the way', 'Future ETA', false, transit],
-      ['Overdue', 'Late', 'ETA has passed', true, overdue],
+      ['Overdue', 'Past ETA', 'ETA has passed', true, overdue],
       ['Unmatched', 'No matching PO', 'Cannot be tied to a PO', true, unmatched],
     ];
 
@@ -2405,6 +2348,10 @@
 
   function renderPlanner() {
     const items = plannerItems();
+    const importRows = Array.from(poById.values())
+      .filter((po) => po.segment === 'import' && poMatchesGlobal(po));
+    const openImportVolume = importRows.reduce((sum, po) => sum + getPoSummary(po).openCbm, 0);
+    const missingCbmLines = importRows.reduce((sum, po) => sum + getPoSummary(po).missingCbmOpen, 0);
     const byPo = new Map();
     items.forEach((item) => {
       if (!byPo.has(item.po.po)) byPo.set(item.po.po, { po: item.po, items: [] });
@@ -2453,7 +2400,7 @@
       ${renderHeader(
         'Planner (concept)',
         `Open Import balances that are not covered by an open receipt — including remainders of partly received POs. Plans live only in this browser session. Data as of ${AS_OF_LABEL}.`,
-        renderTag('wn', 'Concept')
+        `<div class="planner-heading-meta"><span class="sub">Open import volume: ${formatCbm(openImportVolume)} (${formatNumber(missingCbmLines)} lines lack CBM)</span>${renderTag('wn', 'Concept')}</div>`
       )}
 
       <div class="card banner">
@@ -2473,7 +2420,7 @@
 
       <div class="cols">
         <div class="card">
-          <h2>Unplanned Import lines (${formatNumber(items.length)})</h2>
+          <h2>Not yet planned and At risk import lines (${formatNumber(items.length)})</h2>
           <div class="zone big" data-planner-zone="">
             ${Array.from(byPo.values()).map((group) => `
               <div class="gh">${esc(group.po.po)} · ${esc(group.po.vendorId || '—')}</div>
@@ -2566,6 +2513,7 @@
     const rows = dashboardOrders();
     const buckets = {
       unplanned: [],
+      notYetPlanned: [],
       nothing: [],
       overdue: [],
       old: [],
@@ -2579,6 +2527,9 @@
       const shipped = shippedUnitsForPo(po);
       const planned = plannedUnitsForPo(po);
       if (atRisk) buckets.unplanned.push(row);
+      if (summary.balance > 0 && !hasOpenReceipt && !atRisk && unplannedUnitsForPo(po) > 0) {
+        buckets.notYetPlanned.push(row);
+      }
       if (
         summary.balance > 0
         && !hasOpenReceipt
@@ -2604,7 +2555,7 @@
 
   function followUpTotal(buckets) {
     const poKeys = new Set();
-    ['unplanned', 'nothing', 'overdue', 'old'].forEach((key) => {
+    ['unplanned', 'notYetPlanned', 'nothing', 'overdue', 'old'].forEach((key) => {
       buckets[key].forEach((row) => poKeys.add(row.po.po));
     });
     return poKeys.size + buckets.unmatched.length;
@@ -2632,7 +2583,7 @@
               <th class="n">OPEN VALUE</th>
               <th class="n">BALANCE</th>
               <th class="n">PLANNED</th>
-              <th class="n">UNPLANNED</th>
+              <th class="n">UNPLANNED UNITS</th>
               <th>ETA</th>
               <th class="n">DAYS LATE</th>
               <th class="n">PO AGE</th>
@@ -2719,6 +2670,7 @@
   function renderFollowUps() {
     const buckets = followUpBuckets();
     const unplannedGroups = groupByVendor(buckets.unplanned);
+    const notYetPlannedGroups = groupByVendor(buckets.notYetPlanned);
     const nothingGroups = groupByVendor(buckets.nothing);
     const overdueGroups = groupByVendor(buckets.overdue);
     const oldGroups = groupByVendor(buckets.old);
@@ -2786,35 +2738,42 @@
       ${renderReminderLog()}
 
       ${renderFollowUpCategory(
-        '1. At risk — not fully planned',
-        'A balance remains, no receipt is still open, and some balance is neither on a shipped container nor assigned to a draft or booked container. This includes POs that never shipped, remainders of partly received POs and remainders of partly shipped containers — the balance nobody is tracking.',
+        '1. At risk',
+        'Open balance with no open receipt and unplanned units; the PO is over 90 days old or has a received receipt.',
         unplannedGroups,
         renderPoGroup
       )}
 
       ${renderFollowUpCategory(
-        '2. Open balance — already planned',
-        'A balance remains and no receipt is still open. The part not already shipped is assigned to a draft or booked container. This is the “waiting for the next container” list.',
+        '2. Not yet planned',
+        'Unplanned open balance on a PO that does not meet the At risk definition.',
+        notYetPlannedGroups,
+        renderPoGroup
+      )}
+
+      ${renderFollowUpCategory(
+        '3. Open balance — already planned',
+        'Open balance not yet shipped is assigned to a draft or booked container.',
         nothingGroups,
         renderPoGroup
       )}
 
       ${renderFollowUpCategory(
-        '3. Past ETA',
-        'At least one open receipt has an ETA before the 2 Nov 2026 data date.',
+        '4. Past ETA',
+        'At least one open receipt has an ETA before the data date.',
         overdueGroups,
         renderPoGroup
       )}
 
       ${renderFollowUpCategory(
-        '4. Not shipped yet and Old',
+        '5. Not shipped yet and Old',
         'No receipt at all and the PO is more than 90 days old.',
         oldGroups,
         renderPoGroup
       )}
 
       ${renderFollowUpCategory(
-        '5. Receipts unmatched',
+        '6. Receipts unmatched',
         'Receipts with no exact or suffix-normalised PO match. They are not forced onto a PO and are shown across all segments because they have no PO/FOB segment.',
         unmatched,
         renderUnmatchedGroup
@@ -2975,6 +2934,44 @@
     switch (action) {
       case 'go':
         setView(args[0]);
+        break;
+
+      case 'open-open-orders':
+        state.searchQuery = '';
+        state.statusFilter = 'All open';
+        state.portFilter = '';
+        state.includeHeaderOnly = false;
+        state.orderPage = 1;
+        setView('orders');
+        break;
+
+      case 'ship-on-way':
+        state.shipmentStatus = 'In transit';
+        state.shipmentQuery = '';
+        state.shipmentType = '';
+        state.shipmentPage = 1;
+        setView('shipments');
+        break;
+
+      case 'shipments-all':
+        state.shipmentStatus = '';
+        state.shipmentQuery = '';
+        state.shipmentType = '';
+        state.shipmentPage = 1;
+        setView('shipments');
+        break;
+
+      case 'vendors-all':
+        state.searchQuery = '';
+        state.statusFilter = '';
+        state.portFilter = '';
+        state.vendorFilter = '';
+        state.buyerFilter = '';
+        state.includeHeaderOnly = false;
+        state.sortBy = 'vendor';
+        state.sortDir = 'asc';
+        state.orderPage = 1;
+        setView('orders');
         break;
 
       case 'openpo': {
