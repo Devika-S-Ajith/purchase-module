@@ -282,6 +282,28 @@ h2 {
   cursor: pointer;
 }
 
+button.kp {
+  display: block;
+  width: 100%;
+  text-align: left;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+button.kp .sub {
+  display: block;
+}
+
+.kp.sel {
+  outline: 2px solid var(--acc);
+  outline-offset: -2px;
+}
+
+button.s.on {
+  background: var(--acc);
+  color: var(--accfg);
+}
+
 .kp b {
   font-size: 26px;
   display: block;
@@ -321,6 +343,56 @@ h2 {
   height: 10px;
   border-radius: 3px;
   margin-right: 6px;
+}
+
+/* Horizontal status bars ------------------------------------------------ */
+.status-bars {
+  display: grid;
+  gap: 11px;
+  margin-top: 14px;
+}
+
+.status-bar-row {
+  display: grid;
+  gap: 5px;
+}
+
+.status-bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.status-bar-head > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.status-bar-head i {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.status-bar-track {
+  height: 10px;
+  overflow: hidden;
+  background: var(--line);
+  border-radius: 99px;
+}
+
+.status-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  min-width: 0;
 }
 
 /* Tables ----------------------------------------------------------------- */
@@ -525,6 +597,211 @@ button.s {
 /* --------------------------------------------------------------------------
    Responsive
    -------------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------
+   CSV-backed views
+   -------------------------------------------------------------------------- */
+.note,
+.banner {
+  line-height: 1.55;
+}
+
+.banner {
+  border-left: 4px solid var(--acc);
+}
+
+.bad-note {
+  border-left: 4px solid #c62828;
+  background: var(--badbg);
+  color: var(--badfg);
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mut);
+  margin-bottom: 5px;
+}
+
+.check {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--ink);
+  user-select: none;
+}
+
+.check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--acc);
+}
+
+#order-search {
+  min-width: min(100%, 360px);
+  flex: 1 1 280px;
+}
+
+.qty-input {
+  width: 112px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  padding: 0 8px;
+  text-align: right;
+}
+
+.detail {
+  padding: 14px 8px 8px;
+}
+
+.detail h3 {
+  margin: 18px 0 8px;
+  font-size: 13px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px 18px;
+}
+
+.compact-table {
+  min-width: 560px;
+}
+
+.compact-table td,
+.compact-table th {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.order-table {
+  min-width: 1180px;
+}
+
+tr.total-row td {
+  border-top: 2px solid var(--line);
+  background: var(--bg);
+}
+
+.vendor-block {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 14px;
+}
+
+.vendor-block:first-of-type {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.vendor-block h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+a {
+  color: var(--acc);
+}
+
+.late {
+  color: #b3261e;
+  font-weight: 700;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.zone.big {
+  max-height: 72vh;
+}
+
+.zone > .blk {
+  cursor: grab;
+}
+
+.ctns .card .zone {
+  min-height: 82px;
+}
+
+/* Shipments -------------------------------------------------------------- */
+.ship-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.ship-group {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.ship-group-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  width: 100%;
+  min-height: 0;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 400;
+  text-align: left;
+}
+
+.ship-group-head:hover {
+  background: var(--bg);
+}
+
+.ship-group-name {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.ship-group-name b {
+  display: block;
+}
+
+.ship-group-eta {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ship-caret {
+  color: var(--mut);
+}
+
+.ship-group .compact-table {
+  border-top: 1px solid var(--line);
+}
+
+details.more {
+  margin-top: 6px;
+}
+
+details.more summary {
+  cursor: pointer;
+  color: var(--acc);
+  font-weight: 600;
+}
+
 @media (max-width: 820px) {
   .app {
     grid-template-columns: 1fr;
