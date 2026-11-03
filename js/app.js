@@ -71,6 +71,13 @@
     '20GP': { label: '20GP', capacity: 28 },
   };
 
+  const CONTAINER_STATUSES = {
+    draft: { label: 'Draft', variant: '' },
+    booked: { label: 'Booked', variant: 'wn' },
+    shipped: { label: 'Shipped', variant: 'info' },
+    arrived: { label: 'Arrived', variant: 'ok' },
+  };
+
   /* =========================================================================
      1. Decode the compact data bundle
      ========================================================================= */
@@ -293,6 +300,10 @@
     expandedShipmentGroups: new Set(),
 
     receiveReceiptId: '',
+    importGroupKey: '',
+    importPreview: null,
+    importPreviews: {},
+    reminders: [],
 
     plannerContainers: [],
     plannerContainerSequence: 0,
@@ -311,6 +322,17 @@
 
   function isReceiptReceived(receipt) {
     return Boolean(receipt.receiptDate) || Boolean(state.simulatedReceipts[receipt.id]);
+  }
+
+  function receiptReceivedDate(receipt) {
+    if (receipt.receiptDate) return receipt.receiptDate;
+    const simulated = state.simulatedReceipts[receipt.id];
+    return simulated ? simulated.receivedDate : '';
+  }
+
+  function renderReceiptReceivedDate(receipt, emptyLabel = 'Open') {
+    const date = receiptReceivedDate(receipt);
+    return date ? formatDate(date) : `<span class="sub">${esc(emptyLabel)}</span>`;
   }
 
   function getReceiptStatus(receipt) {
@@ -336,9 +358,76 @@
     return Math.max(0, Math.min(line.ordered, line.ordered - effectiveBalance(line)));
   }
 
+  function poHasOpenReceipt(po) {
+    return po.receipts.some((receipt) => !receipt.invalid && !isReceiptReceived(receipt));
+  }
+
+  function containerStatusKey(container) {
+    return CONTAINER_STATUSES[container.status] ? container.status : 'draft';
+  }
+
+  function containerIsEditable(container) {
+    const key = containerStatusKey(container);
+    return key === 'draft' || key === 'booked';
+  }
+
+  function containerUnits(container) {
+    return container.assignments.reduce((sum, assignment) => sum + assignment.units, 0);
+  }
+
+  function plannedUnitsForLine(line) {
+    return state.plannerAssigned[line.id] || 0;
+  }
+
+  function plannedUnitsForPo(po) {
+    return po.lines.reduce((sum, line) => sum + plannedUnitsForLine(line), 0);
+  }
+
+  function shippedUnitsForLine(line) {
+    return state.plannerContainers.reduce((sum, container) => {
+      if (containerStatusKey(container) !== 'shipped') return sum;
+      return sum + container.assignments
+        .filter((assignment) => assignment.lineId === line.id)
+        .reduce((assignmentSum, assignment) => assignmentSum + assignment.units, 0);
+    }, 0);
+  }
+
+  function shippedUnitsForPo(po) {
+    return po.lines.reduce((sum, line) => sum + shippedUnitsForLine(line), 0);
+  }
+
+  function plannerContainersForPo(po, statuses) {
+    const lineIds = new Set(po.lines.map((line) => line.id));
+    return state.plannerContainers.filter((container) =>
+      statuses.includes(containerStatusKey(container))
+      && container.assignments.some((assignment) => lineIds.has(assignment.lineId))
+    );
+  }
+
+  function shippedContainersForPo(po) {
+    return plannerContainersForPo(po, ['shipped']);
+  }
+
+  function arrivedContainersForPo(po) {
+    return plannerContainersForPo(po, ['arrived']);
+  }
+
+  function unplannedUnitsForLine(line) {
+    return Math.max(0, openUnitsForLine(line) - plannedUnitsForLine(line) - shippedUnitsForLine(line));
+  }
+
+  function unplannedUnitsForPo(po) {
+    return po.lines.reduce((sum, line) => sum + unplannedUnitsForLine(line), 0);
+  }
+
+  function poIsAtRisk(po, summary) {
+    return summary.balance > 0 && !poHasOpenReceipt(po) && unplannedUnitsForPo(po) > 0;
+  }
+
   function lineStatus(line) {
     if (line.isCheckData) return 'Check data';
     if (openUnitsForLine(line) <= 0) return 'Received';
+    if (shippedUnitsForLine(line) > 0) return 'In transit';
     if (receivedUnitsForLine(line) > 0) return 'Partly received';
     return 'Open';
   }
@@ -399,6 +488,7 @@
 
     const nextReceipt = openReceipts[0] || receivedReceipts[0] || null;
     const ageDays = po.poDate ? diffDays(po.poDate, AS_OF) : null;
+    const shippedUnits = shippedUnitsForPo(po);
 
     let status;
     if (!po.lines.length) {
@@ -408,6 +498,8 @@
     } else if (openReceipts.some((receipt) => receipt.etaDate && receipt.etaDate < AS_OF)) {
       status = 'Overdue';
     } else if (openReceipts.some((receipt) => receipt.etaDate && receipt.etaDate >= AS_OF)) {
+      status = 'In transit';
+    } else if (shippedUnits > 0) {
       status = 'In transit';
     } else if (balance > 0 && receivedReceipts.length > 0) {
       status = 'Unshipped balance';
@@ -599,11 +691,26 @@
       </span>`;
   }
 
-  function renderShipmentCell(summary) {
+  function renderShipmentCell(summary, po) {
+    const shippedContainers = po ? shippedContainersForPo(po) : [];
+    const arrivedContainers = po ? arrivedContainersForPo(po) : [];
+    const history = shippedContainers.length
+      ? { containers: shippedContainers, label: 'Shipped', dateKey: 'sailingDate' }
+      : arrivedContainers.length
+        ? { containers: arrivedContainers, label: 'Arrived', dateKey: 'arrivedDate' }
+        : null;
+    if (history) {
+      const first = history.containers[0];
+      const extra = history.containers.length > 1 ? ` +${formatNumber(history.containers.length - 1)}` : '';
+      const date = first[history.dateKey] ? ` ${formatDate(first[history.dateKey])}` : '';
+      return `
+        <span class="mono">${esc(first.id)}${extra}</span>
+        <span class="sub">· ${history.label}${date}${first.port ? ` · ${esc(first.port)}` : ''}</span>`;
+    }
     if (!summary.nextReceipt) return '<span class="sub">No receipt</span>';
     const receipt = summary.nextReceipt;
     const tracking = receipt.tracking || 'No tracking';
-    const type = receipt.type || '—';
+    const type = receipt.type || '-';
     return `
       <span class="mono">${esc(tracking)}</span>
       <span class="sub">· ${esc(type)} · ${formatNumber(summary.receiptCount)} shipment${summary.receiptCount === 1 ? '' : 's'}</span>`;
@@ -626,6 +733,12 @@
       nothingComing: 0,
       openCbm: 0,
       missingCbmLines: 0,
+      orderedUnits: 0,
+      receivedUnits: 0,
+      inTransitUnits: 0,
+      plannedUnits: 0,
+      atRiskUnits: 0,
+      atRiskPos: 0,
     };
 
     const end14 = addDays(AS_OF, 14);
@@ -646,6 +759,25 @@
       if (summary.nextEta && summary.nextEta >= AS_OF && summary.nextEta <= end14) totals.arriving14 += 1;
       totals.openCbm += summary.openCbm;
       totals.missingCbmLines += summary.missingCbmOpen;
+
+      const hasOpenReceipt = poHasOpenReceipt(po);
+      if (!hasOpenReceipt && poIsAtRisk(po, summary)) totals.atRiskPos += 1;
+      po.lines.forEach((line) => {
+        if (line.isCheckData) return;
+        const open = openUnitsForLine(line);
+        totals.orderedUnits += line.ordered;
+        totals.receivedUnits += receivedUnitsForLine(line);
+        if (open <= 0) return;
+        if (hasOpenReceipt) {
+          totals.inTransitUnits += open;
+        } else {
+          const shipped = Math.min(shippedUnitsForLine(line), open);
+          const planned = Math.min(plannedUnitsForLine(line), Math.max(0, open - shipped));
+          totals.inTransitUnits += shipped;
+          totals.plannedUnits += planned;
+          totals.atRiskUnits += Math.max(0, open - shipped - planned);
+        }
+      });
 
       if (statusCounts[summary.status] != null) {
         statusCounts[summary.status] += 1;
@@ -709,6 +841,16 @@
     const receiptMatches = HEALTH.counts.matchedReceipts;
     const receiptTotal = HEALTH.counts.receipts;
 
+    const coverageTotal =
+      totals.receivedUnits + totals.inTransitUnits + totals.plannedUnits + totals.atRiskUnits;
+    const coveragePct = (value) => (coverageTotal ? (value / coverageTotal) * 100 : 0);
+    const coverage = [
+      ['Received', totals.receivedUnits, '#5b8f4a', 'Received in the export, via a simulated receipt or an arrived container'],
+      ['In transit', totals.inTransitUnits, '#3b82c4', 'Open balance covered by an open receipt or a shipped container'],
+      ['Planned', totals.plannedUnits, '#0f6b6f', 'Assigned to a draft or booked container in the Planner'],
+      ['At risk', totals.atRiskUnits, '#e5534b', 'Open balance with no receipt and some balance neither shipped nor planned'],
+    ];
+
     return `
       ${renderHeader(
         'Purchasing dashboard',
@@ -719,7 +861,7 @@
       <div class="grid">
         ${renderMetricCard(formatNumber(totals.openPos), 'Open POs', 'orders')}
         ${renderMetricCard(formatValue(totals.openValue), 'Open PO value', 'orders')}
-        ${renderMetricCard(formatNumber(totals.inTransit), 'In transit', 'shipments')}
+        ${renderMetricCard(formatNumber(totals.inTransit), 'In transit', 'shipments', false, 'Open receipts or shipped containers')}
         ${renderMetricCard(formatNumber(totals.pastEta), 'Past ETA', 'followup', totals.pastEta > 0)}
         ${renderMetricCard(formatNumber(totals.arriving14), 'Arriving in 14 days', 'shipments')}
         ${renderMetricCard(formatNumber(totals.nothingComing), 'Unshipped balance', 'followup', totals.nothingComing > 0)}
@@ -730,6 +872,46 @@
           false,
           `${formatNumber(totals.missingCbmLines)} open import line${totals.missingCbmLines === 1 ? '' : 's'} with CBM missing`
         )}
+        ${renderMetricCard(
+          formatNumber(totals.plannedUnits),
+          'Planned units',
+          'planner',
+          false,
+          'Open balance in draft or booked containers'
+        )}
+        ${renderMetricCard(
+          formatNumber(totals.atRiskUnits),
+          'At risk units',
+          'followup',
+          totals.atRiskUnits > 0,
+          `${formatNumber(totals.atRiskPos)} POs with no receipt and some balance neither shipped nor planned`
+        )}
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div>
+            <h2>Order coverage</h2>
+            <div class="sub">What has happened to every ordered unit in the current segment.</div>
+          </div>
+          <span class="sub"><b>${formatNumber(totals.orderedUnits)}</b> ordered units</span>
+        </div>
+        <div class="pipe">
+          ${coverage.map(([label, value, colour]) => value > 0
+            ? `<span style="width:${coveragePct(value)}%;background:${colour}" title="${attr(label)}: ${formatNumber(value)} units"></span>`
+            : '').join('')}
+        </div>
+        <div class="lg">
+          ${coverage.map(([label, value, colour, note]) => `
+            <span title="${attr(note)}">
+              <i style="background:${colour}"></i>${esc(label)}
+              <b>${formatNumber(value)}</b>
+              <span class="sub">${coverageTotal ? `${Math.round(coveragePct(value))}%` : '0%'}</span>
+            </span>`).join('')}
+        </div>
+        <div class="sub" style="margin-top:10px">
+          Received is derived as ordered − balance in the export, plus simulated receipts and arrived containers. In transit includes open receipts and containers marked Shipped. Planned is the remaining open balance in draft or booked containers; at risk is the part neither shipped nor planned. Check-data lines are excluded.
+        </div>
       </div>
 
       <div class="card">
@@ -753,7 +935,7 @@
               </div>`;
           }).join('')}
         </div>
-        <div class="sub" style="margin-top:8px">Partly received POs are grouped under “Not shipped yet” in this chart. “Unshipped balance” is the key flag: some goods were received, a balance remains, and no receipt is still open.</div>
+        <div class="sub" style="margin-top:8px">Partly received POs are grouped under “Not shipped yet” in this chart. “Unshipped balance” means some goods were received, a balance remains, and no receipt is still open. The Order coverage bar above splits the remaining balance into in transit from shipped containers, planned and at risk.</div>
       </div>
 
       <div class="two">
@@ -918,17 +1100,19 @@
       'In transit': 0,
     };
     let oldCount = 0;
+    let riskCount = 0;
 
-    rows.forEach(({ summary }) => {
+    rows.forEach(({ po, summary }) => {
       if (counts[summary.status] != null) counts[summary.status] += 1;
       if (summary.old) oldCount += 1;
+      if (poIsAtRisk(po, summary)) riskCount += 1;
     });
 
     const cards = [
       ['Overdue', 'Past ETA', 'Open receipt ETA is before the data date', true],
       ['Unshipped balance', 'Unshipped balance', 'Part received; no shipment left', true],
       ['Not shipped yet', 'Not shipped yet', `${formatNumber(oldCount)} over 90 days old`, oldCount > 0],
-      ['In transit', 'In transit', 'Open receipts with a future ETA', false],
+      ['In transit', 'In transit', 'Open receipts or shipped containers', false],
     ];
 
     host.innerHTML = cards.map(([status, label, note, hot]) => `
@@ -941,7 +1125,16 @@
         <span class="sub">${esc(label)}</span>
         <span class="sub">${esc(note)}</span>
       </button>
-    `).join('');
+    `).join('') + `
+      <button
+        class="card kp${riskCount ? ' hot' : ''}"
+        data-action="go:followup"
+        title="Open Follow-ups to see balances with no receipt and some balance not planned"
+      >
+        <b>${formatNumber(riskCount)}</b>
+        <span class="sub">Unplanned balance</span>
+        <span class="sub">POs with no open receipt and some balance not planned</span>
+      </button>`;
   }
 
   function paginationButtons(pages, current, action = 'page') {
@@ -992,7 +1185,9 @@
                 <th class="n">LINES</th>
                 <th class="n">ORDERED</th>
                 <th class="n">RECEIVED %</th>
+                <th class="n">PLANNED</th>
                 <th class="n">BALANCE</th>
+                <th class="n">UNPLANNED</th>
                 <th>ETA</th>
                 <th>SHIPMENT</th>
                 <th>STATUS</th>
@@ -1017,11 +1212,21 @@
 
   function renderOrderRow(po, summary) {
     const expanded = state.expandedOrders.has(po.po);
+    const hasOpenReceipt = poHasOpenReceipt(po);
+    const shipped = shippedUnitsForPo(po);
+    const planned = Math.max(0, Math.min(plannedUnitsForPo(po), summary.balance - shipped));
+    const unplanned = unplannedUnitsForPo(po);
     const tags = [];
 
     if (!po.lines.length) tags.push(renderTag('', 'No line items'));
     if (po.synthetic) tags.push(renderTag('bad', 'PO header missing', 'This detail PO has no row in PurchPO. Vendor was inferred from the PO number.'));
     if (summary.old) tags.push(renderTag('wn', 'Old', 'Not shipped yet and PO age is over 90 days'));
+    if (shipped > 0) tags.push(renderTag('info', 'In container', 'Some or all open units are on a container marked Shipped.'));
+    if (summary.balance > 0 && !hasOpenReceipt && unplanned > 0) {
+      tags.push(renderTag('bad', 'Unplanned balance', 'Open balance is not covered by an open receipt, a shipped container or a container plan.'));
+    } else if (summary.balance > 0 && !hasOpenReceipt && planned > 0 && unplanned <= 0) {
+      tags.push(renderTag('ok', 'Planned', 'All remaining open balance is assigned in the Planner.'));
+    }
 
     return `
       <tr class="lk" data-action="toggle:${attr(po.po)}">
@@ -1030,15 +1235,17 @@
         <td title="${attr(purchaserTitle(po.purchaser))}">${esc(po.buyer || '—')}</td>
         <td class="n">${formatNumber(summary.lineCount)}</td>
         <td class="n">${formatNumber(summary.ordered)}</td>
-        <td class="n">${summary.receivedPct == null ? '—' : `${summary.receivedPct.toFixed(0)}%`}</td>
+        <td class="n" title="Received is derived as ordered minus PO balance in this export">${summary.receivedPct == null ? '—' : `${summary.receivedPct.toFixed(0)}%`}</td>
+        <td class="n">${planned ? formatNumber(planned) : '—'}</td>
         <td class="n">${formatNumber(summary.balance)}</td>
+        <td class="n" title="${hasOpenReceipt ? 'Open balance is covered by an open receipt' : shipped > 0 ? 'Open balance is partly or fully on shipped containers' : 'Open balance with no open receipt and some balance not planned'}">${hasOpenReceipt ? '<span class="sub">In transit</span>' : unplanned > 0 ? `<span class="late">${formatNumber(unplanned)}</span>` : shipped > 0 ? '<span class="sub">In transit</span>' : '0'}</td>
         <td>${renderEtaCell(summary)}</td>
-        <td>${renderShipmentCell(summary)}</td>
+        <td>${renderShipmentCell(summary, po)}</td>
         <td>${renderStatusTag(summary.status)}</td>
       </tr>
       ${expanded ? `
         <tr class="sub2">
-          <td colspan="10">${renderOrderDetail(po, summary)}</td>
+          <td colspan="12">${renderOrderDetail(po, summary)}</td>
         </tr>` : ''}`;
   }
 
@@ -1092,7 +1299,7 @@
                       <td class="mono">${esc(receipt.invoiceNo)}</td>
                       <td>${renderReceiptStatusTag(receipt)}</td>
                       <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
-                      <td>${receipt.receiptDate ? formatDate(receipt.receiptDate) : '<span class="sub">Open</span>'}</td>
+                      <td>${renderReceiptReceivedDate(receipt)}</td>
                       <td><span class="mono">${esc(receipt.tracking || '—')}</span>${receipt.containerId ? `<br><span class="sub">Container ${esc(receipt.containerId)}</span>` : ''}</td>
                       <td>${esc(receipt.type || '—')}</td>
                       <td title="${attr(warehouse.title)}">${esc(warehouse.label)}</td>
@@ -1104,6 +1311,9 @@
           </div>` : '<div class="sub">No receipt matched to this PO.</div>'}
 
         <h3>Lines</h3>
+        <div class="sub" style="margin-bottom:8px">
+          Received is derived from ordered minus PO balance in this export. Planned is assigned to a draft or booked container. “In container” is on a container marked Shipped. “In transit” also includes open receipts.
+        </div>
         ${po.lines.length ? `
           <div class="sc">
             <table class="compact-table">
@@ -1113,7 +1323,10 @@
                   <th>DESCRIPTION</th>
                   <th class="n">ORDERED</th>
                   <th class="n">RECEIVED</th>
+                  <th class="n">PLANNED</th>
+                  <th class="n">IN CONTAINER</th>
                   <th class="n">BALANCE</th>
+                  <th class="n">UNPLANNED</th>
                   <th class="n">PRICE</th>
                   <th class="n">CBM</th>
                   <th>STATUS</th>
@@ -1123,13 +1336,21 @@
                 ${po.lines.map((line) => {
                   const effective = effectiveBalance(line);
                   const status = lineStatus(line);
+                  const open = openUnitsForLine(line);
+                  const shipped = shippedUnitsForLine(line);
+                  const planned = Math.max(0, Math.min(plannedUnitsForLine(line), open - shipped));
+                  const unplanned = unplannedUnitsForLine(line);
+                  const hasOpenReceipt = poHasOpenReceipt(po);
                   return `
                     <tr>
                       <td class="mono">${esc(line.itemId || '—')}</td>
                       <td>${esc(line.description || '—')}</td>
                       <td class="n">${formatNumber(line.ordered)}</td>
                       <td class="n">${formatNumber(receivedUnitsForLine(line))}</td>
+                      <td class="n">${planned ? formatNumber(planned) : '—'}</td>
+                      <td class="n">${shipped ? formatNumber(shipped) : '—'}</td>
                       <td class="n">${formatNumber(effective)}</td>
+                      <td class="n">${hasOpenReceipt ? '<span class="sub">In transit</span>' : unplanned > 0 ? `<span class="late">${formatNumber(unplanned)}</span>` : shipped > 0 ? '<span class="sub">In transit</span>' : '0'}</td>
                       <td class="n">${line.price ? line.price.toFixed(3) : '—'}</td>
                       <td class="n">${line.cbm > 0 ? formatCbm(line.cbm) : '<span class="sub">—</span>'}</td>
                       <td>${status === 'Check data' ? renderTag('bad', status, 'Balance is negative or greater than ordered quantity') : renderStatusTag(status)}</td>
@@ -1284,7 +1505,7 @@
                       <td>${receipt.matchPo ? `<a href="#orders" data-action="openpo:${attr(receipt.matchPo)}"><b>${esc(receipt.matchPo)}</b></a>` : '<span class="sub">—</span>'}</td>
                       <td>${esc(receipt.vendorId || '—')}</td>
                       <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
-                      <td>${receipt.receiptDate ? formatDate(receipt.receiptDate) : '<span class="sub">Not yet</span>'}</td>
+                      <td>${renderReceiptReceivedDate(receipt, 'Not yet')}</td>
                       <td>${renderReceiptStatusTag(receipt)}</td>
                     </tr>`;
                 }).join('')}
@@ -1348,7 +1569,10 @@
       ${renderHeader(
         'Shipments',
         `Receipts grouped by container or tracking number. Click a group to see its receipts. Data as of ${AS_OF_LABEL}.`,
-        `<div class="sub">${formatNumber(receiptRows.length)} receipts</div>`
+        `<div class="row" style="gap:8px">
+          <span class="sub">${formatNumber(receiptRows.length)} receipts</span>
+          <button class="s" data-action="go:import">Import packing list</button>
+        </div>`
       )}
 
       <div class="grid" id="shipment-kpis"></div>
@@ -1376,7 +1600,7 @@
   }
 
   /* =========================================================================
-     9. Receive (simulated)
+     9. Receive one receipt (simulated)
      ========================================================================= */
 
   function openReceiveReceipts() {
@@ -1390,7 +1614,7 @@
     const receipts = openReceiveReceipts();
     if (!receipts.length) {
       return `
-        ${renderHeader('Receive (simulated)', `No open matched receipts in the current segment. Data as of ${AS_OF_LABEL}.`)}
+        ${renderHeader('Receive one receipt (simulated)', `No open matched receipts in the current segment. Data as of ${AS_OF_LABEL}.`)}
         <div class="card">${renderTag('wn', 'Simulated import')} <span class="sub">There is no open matched receipt to receive in this filter.</span></div>`;
     }
 
@@ -1406,14 +1630,19 @@
 
     return `
       ${renderHeader(
-        'Receive (simulated)',
-        `The receipt export has no line quantities. This page simulates a packing-list import and updates only this browser session. Data as of ${AS_OF_LABEL}.`,
+        'Receive one receipt (simulated)',
+        `The receipt export has no line quantities. This single-receipt path lets you edit the delivered quantities on one PO and updates only this browser session. For a whole container, use Import packing list. Data as of ${AS_OF_LABEL}.`,
         renderTag('wn', 'Simulated import')
       )}
 
       <div class="card note">
         <b>No line-level packing list exists in PurchReceipt.</b>
         Choose an open matched receipt, edit the pre-filled quantities if the delivery is partial, then confirm. The in-memory balance changes immediately; nothing is written back to the CSV or Odoo.
+      </div>
+
+      <div class="card row" style="justify-content:flex-start">
+        <span class="sub">Need to process a whole container or tracking group at once?</span>
+        <button class="s" data-action="go:import">Import a multi-PO packing list</button>
       </div>
 
       <div class="card">
@@ -1475,7 +1704,7 @@
             </table>
           </div>
           <div class="row" style="margin-top:12px">
-            <span class="sub">Remaining balance after confirmation will appear in Follow-ups as “Open balance — no shipment” when this was the last open receipt.</span>
+            <span class="sub">After confirmation, a remaining balance appears in Follow-ups — either as an already-planned remainder or as “At risk — not fully planned”.</span>
             <button class="p" data-action="confirm-receive">Confirm simulated receipt</button>
           </div>` : '<div class="sub">This PO has no open lines.</div>'}
       </div>`;
@@ -1515,6 +1744,345 @@
   }
 
   /* =========================================================================
+     9b. Receipt import (simulated)
+     ========================================================================= */
+
+  function importSampleDocuments() {
+    const groups = new Map();
+
+    receiptRows.forEach((receipt) => {
+      if (!receipt.matchPo || !receipt.poRef || receipt.invalid) return;
+      const saved = state.importPreviews[receipt.groupKey];
+      if (isReceiptReceived(receipt) && !(saved && saved.applied)) return;
+
+      if (!groups.has(receipt.groupKey)) {
+        groups.set(receipt.groupKey, {
+          key: receipt.groupKey,
+          label: receipt.groupLabel,
+          isContainer: Boolean(receipt.containerId),
+          receipts: [],
+        });
+      }
+      groups.get(receipt.groupKey).receipts.push(receipt);
+    });
+
+    const documents = [];
+    groups.forEach((group) => {
+      const pos = Array.from(new Set(group.receipts.map((receipt) => receipt.matchPo)))
+        .map((poNumber) => poById.get(poNumber))
+        .filter(Boolean);
+      if (pos.length < 4 || pos.length > 6) return;
+
+      const openLines = pos.reduce(
+        (sum, po) => sum + po.lines.filter((line) => !line.isCheckData && openUnitsForLine(line) > 0).length,
+        0
+      );
+      const posWithOpen = pos.filter(
+        (po) => po.lines.some((line) => !line.isCheckData && openUnitsForLine(line) > 0)
+      ).length;
+      const openUnits = pos.reduce(
+        (sum, po) => sum + po.lines.reduce(
+          (lineSum, line) => lineSum + (line.isCheckData ? 0 : openUnitsForLine(line)),
+          0
+        ),
+        0
+      );
+      const clearsOpenReceipts = pos.filter((po) => {
+        if (!po.lines.some((line) => !line.isCheckData && openUnitsForLine(line) > 0)) return false;
+        const openReceipts = po.receipts.filter(
+          (receipt) => !receipt.invalid && !isReceiptReceived(receipt)
+        );
+        return openReceipts.length > 0 && openReceipts.every((receipt) => receipt.groupKey === group.key);
+      }).length;
+      const saved = state.importPreviews[group.key];
+      if (openLines > 30) return;
+      if (openLines < 4 && !(saved && saved.applied)) return;
+      if (openLines <= 0 && !(saved && saved.applied)) return;
+
+      documents.push({
+        key: group.key,
+        label: group.label,
+        isContainer: group.isContainer,
+        receipts: group.receipts,
+        pos,
+        openLines,
+        openUnits,
+        posWithOpen,
+        clearsOpenReceipts,
+      });
+    });
+
+    documents.sort((a, b) =>
+      b.clearsOpenReceipts - a.clearsOpenReceipts ||
+      b.posWithOpen - a.posWithOpen ||
+      b.openUnits - a.openUnits ||
+      b.openLines - a.openLines ||
+      b.pos.length - a.pos.length ||
+      a.label.localeCompare(b.label)
+    );
+
+    return documents;
+  }
+
+  function sampleImportQty(line) {
+    const open = openUnitsForLine(line);
+    if (open <= 0) return 0;
+
+    const carton = line.boxQty > 0 ? line.boxQty : 1;
+    let qty = Math.floor((open * 0.7) / carton) * carton;
+    if (qty <= 0) qty = Math.min(open, carton);
+    qty = Math.max(1, Math.min(open, qty));
+    return qty;
+  }
+
+  function buildImportPreview(document) {
+    const rows = document.pos.map((po) => {
+      const receipts = document.receipts.filter((receipt) => receipt.matchPo === po.po);
+      const entries = po.lines
+        .filter((line) => !line.isCheckData)
+        .map((line) => {
+          const before = openUnitsForLine(line);
+          const qty = sampleImportQty(line);
+          return { line, qty, before, after: Math.max(0, before - qty) };
+        })
+        .filter((entry) => entry.qty > 0);
+
+      const beforeUnits = entries.reduce((sum, entry) => sum + entry.before, 0);
+      const units = entries.reduce((sum, entry) => sum + entry.qty, 0);
+
+      return {
+        po,
+        receipts,
+        entries,
+        beforeUnits,
+        units,
+        afterUnits: Math.max(0, beforeUnits - units),
+      };
+    }).sort((a, b) => a.po.po.localeCompare(b.po.po));
+
+    const vendors = Array.from(new Set(rows.map((row) => row.po.vendorId).filter(Boolean))).sort();
+
+    return {
+      key: document.key,
+      label: document.label,
+      isContainer: document.isContainer,
+      receipts: document.receipts,
+      receiptCount: document.receipts.length,
+      pos: rows,
+      poCount: rows.length,
+      vendors,
+      totalLines: rows.reduce((sum, row) => sum + row.entries.length, 0),
+      totalUnits: rows.reduce((sum, row) => sum + row.units, 0),
+      applied: false,
+    };
+  }
+
+  function getImportPreview(documents) {
+    const stored = state.importGroupKey ? state.importPreviews[state.importGroupKey] : null;
+    if (stored && stored.applied) return stored;
+
+    let document = documents.find((row) => row.key === state.importGroupKey);
+    if (!document && state.importPreview) {
+      document = documents.find((row) => row.key === state.importPreview.key);
+    }
+    if (!document) document = documents[0];
+    if (!document) return null;
+
+    const preview = buildImportPreview(document);
+    state.importGroupKey = preview.key;
+    state.importPreview = preview;
+    state.importPreviews[preview.key] = preview;
+    return preview;
+  }
+
+  function applyImport() {
+    const preview = state.importPreview;
+    if (!preview || preview.applied) return;
+
+    preview.pos.forEach((row) => {
+      const quantities = {};
+      row.entries.forEach((entry) => {
+        if (entry.qty <= 0) return;
+        state.simulatedLineQty[entry.line.id] = (state.simulatedLineQty[entry.line.id] || 0) + entry.qty;
+        quantities[entry.line.id] = entry.qty;
+      });
+      row.receipts.forEach((receipt) => {
+        state.simulatedReceipts[receipt.id] = {
+          receivedDate: AS_OF,
+          quantities,
+        };
+      });
+    });
+
+    preview.applied = true;
+    state.importPreviews[preview.key] = preview;
+    clearSummaryCache();
+    render();
+    showToast(
+      `Sample packing list applied — ${formatNumber(preview.totalUnits)} units across ${formatNumber(preview.poCount)} POs. Remaining balances are now tracked in this session.`
+    );
+  }
+
+  function renderImport() {
+    const documents = importSampleDocuments();
+    const preview = getImportPreview(documents);
+
+    const header = renderHeader(
+      'Import packing list (simulated)',
+      `Read one packing list and match every PO in the document at once. The sample uses real container/tracking groups and real PO lines; quantities are generated for the demo. Data as of ${AS_OF_LABEL}.`,
+      renderTag('wn', 'Simulated import')
+    );
+
+    const intro = `
+      <div class="card note">
+        <b>The receipt export has no line quantities.</b>
+        This page takes a real container/tracking group, generates sample shipped quantities for its open PO lines, previews the result for every PO in one table, then applies the quantities to this browser session. Nothing is uploaded, and nothing is written back to the CSV or Odoo.
+      </div>`;
+
+    if (!preview) {
+      return `
+        ${header}
+        ${intro}
+        <div class="card sub">No container/tracking group with 4–6 matched POs and at least 4 open lines was found. The sample import needs those conditions to show a multi-PO document.</div>`;
+    }
+
+    const options = documents.map((document) => {
+      const savedPreview = state.importPreviews[document.key];
+      const documentName = `${document.isContainer ? 'Container' : 'Tracking'} ${document.label} · ${document.pos.length} POs`;
+      return {
+        key: document.key,
+        label: savedPreview && savedPreview.applied
+          ? `${documentName} · applied`
+          : `${documentName} · ${formatNumber(document.openLines)} open lines · ${formatNumber(document.openUnits)} units`,
+      };
+    });
+    if (!options.some((option) => option.key === preview.key)) {
+      options.unshift({
+        key: preview.key,
+        label: `${preview.isContainer ? 'Container' : 'Tracking'} ${preview.label} · ${formatNumber(preview.poCount)} POs · applied`,
+      });
+    }
+
+    const rows = preview.pos.map((row) => {
+      const summary = getPoSummary(row.po);
+      const matchType = row.receipts[0] ? row.receipts[0].matchType || '—' : '—';
+      const afterRisk = preview.applied && row.afterUnits > 0 && poIsAtRisk(row.po, summary);
+      return `
+        <tr>
+          <td><a href="#orders" data-action="openpo:${attr(row.po.po)}"><b>${esc(row.po.po)}</b></a></td>
+          <td>${esc(row.po.vendorId || '—')}</td>
+          <td class="n">${formatNumber(row.entries.length)}</td>
+          <td class="n"><b>${formatNumber(row.units)}</b></td>
+          <td class="n">${formatNumber(row.beforeUnits)}</td>
+          <td class="n">${row.afterUnits > 0 ? `<span class="late">${formatNumber(row.afterUnits)}</span>` : '0'}</td>
+          <td>${esc(matchType)}</td>
+          <td>${row.entries.length ? `${renderStatusTag(summary.status)}${afterRisk ? ` ${renderTag('bad', 'At risk')}` : ''}` : renderTag('', 'No open balance')}</td>
+        </tr>`;
+    }).join('');
+
+    const lineRows = preview.pos.flatMap((row) =>
+      row.entries.map((entry) => `
+        <tr>
+          <td class="mono">${esc(row.po.po)}</td>
+          <td class="mono">${esc(entry.line.itemId || '—')}</td>
+          <td>${esc(entry.line.description || '—')}</td>
+          <td class="n"><b>${formatNumber(entry.qty)}</b></td>
+          <td class="n">${formatNumber(entry.before)}</td>
+          <td class="n">${formatNumber(entry.after)}</td>
+        </tr>`)
+    ).join('');
+
+    return `
+      ${header}
+      ${intro}
+
+      <div class="card">
+        <div class="row" style="align-items:flex-start">
+          <div style="flex:1 1 320px">
+            <label class="field-label" for="import-document">Sample packing list</label>
+            <select id="import-document" style="width:100%">
+              ${options.map((option) => `<option value="${attr(option.key)}"${option.key === preview.key ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
+            </select>
+            <div class="sub" style="margin-top:6px">All vendors and segments are shown so the document stays whole; the global filters do not apply on this page. Receipt documents are not split by PO/FOB segment.</div>
+          </div>
+          ${preview.applied ? renderTag('ok', 'Applied in this session') : renderTag('wn', 'Ready to apply')}
+        </div>
+
+        <div class="detail-grid" style="margin-top:14px">
+          <div><div class="sub">Document</div><div class="mono">${esc(preview.label)}</div></div>
+          <div><div class="sub">Type</div><div>${preview.isContainer ? 'Container' : 'Tracking number'}</div></div>
+          <div><div class="sub">Receipts</div><div>${formatNumber(preview.receiptCount)}</div></div>
+          <div><div class="sub">POs in document</div><div><b>${formatNumber(preview.poCount)}</b></div></div>
+          <div><div class="sub">Vendors</div><div>${esc(preview.vendors.join(', ') || '—')}</div></div>
+          <div><div class="sub">Lines on this list</div><div>${formatNumber(preview.totalLines)}</div></div>
+          <div><div class="sub">Units on this list</div><div><b>${formatNumber(preview.totalUnits)}</b></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <div>
+            <h2>Result for every PO in the document</h2>
+            <div class="sub">Every matched PO appears once, including POs with no open balance.</div>
+          </div>
+          <span class="sub">${formatNumber(preview.totalLines)} lines · ${formatNumber(preview.totalUnits)} units</span>
+        </div>
+        <div class="sc" style="margin-top:10px">
+          <table>
+            <thead>
+              <tr>
+                <th>PO</th>
+                <th>VENDOR</th>
+                <th class="n">LINES</th>
+                <th class="n">THIS LIST</th>
+                <th class="n">BALANCE BEFORE</th>
+                <th class="n" title="Expected balance after applying this list">BALANCE AFTER</th>
+                <th>MATCH</th>
+                <th>STATUS</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <span class="sub">Applying updates PO balances in this session only. A real import would validate the file, match every PO, then post the receipt.</span>
+          <button class="p" data-action="apply-import"${preview.applied ? ' disabled' : ''}>${preview.applied ? 'Applied' : 'Apply sample import'}</button>
+        </div>
+      </div>
+
+      ${preview.applied ? `
+        <div class="card row" style="justify-content:flex-start">
+          <span class="sub">The remaining balances are now tracked. Open the Planner to plan Import remainders, or Follow-ups to see the automatic at-risk flag.</span>
+          <button class="s" data-action="go:planner">Open Planner</button>
+          <button class="s" data-action="go:followup">Open Follow-ups</button>
+        </div>` : ''}
+
+      ${preview.totalLines ? `
+        <div class="card">
+          <div class="row">
+            <h2>Packing list lines</h2>
+            <span class="sub">Sample quantities generated for the demo</span>
+          </div>
+          <div class="sc" style="margin-top:10px">
+            <table>
+              <thead>
+                <tr>
+                  <th>PO</th>
+                  <th>ITEM</th>
+                  <th>DESCRIPTION</th>
+                  <th class="n">QTY ON LIST</th>
+                  <th class="n">BALANCE BEFORE</th>
+                  <th class="n">BALANCE AFTER</th>
+                </tr>
+              </thead>
+              <tbody>${lineRows}</tbody>
+            </table>
+          </div>
+        </div>` : ''}
+    `;
+  }
+
+  /* =========================================================================
      10. Planner (concept)
      ========================================================================= */
 
@@ -1522,7 +2090,11 @@
     const items = [];
 
     poById.forEach((po) => {
-      if (po.segment !== 'import' || po.receipts.length > 0) return;
+      // Plan any open Import balance that is not already covered by an open
+      // receipt. This deliberately includes partially received POs: their
+      // remainder is exactly the balance that gets forgotten.
+      if (po.segment !== 'import') return;
+      if (poHasOpenReceipt(po)) return;
       if (!poMatchesGlobal(po)) return;
 
       po.lines.forEach((line) => {
@@ -1540,8 +2112,22 @@
     return items;
   }
 
+  function syncPlannerAssigned() {
+    const assigned = {};
+    state.plannerContainers.forEach((container) => {
+      if (!containerIsEditable(container)) return;
+      container.assignments.forEach((assignment) => {
+        assigned[assignment.lineId] = (assigned[assignment.lineId] || 0) + assignment.units;
+      });
+    });
+    state.plannerAssigned = assigned;
+  }
+
   function plannerRemaining(line) {
-    return Math.max(0, openUnitsForLine(line) - (state.plannerAssigned[line.id] || 0));
+    return Math.max(
+      0,
+      openUnitsForLine(line) - (state.plannerAssigned[line.id] || 0) - shippedUnitsForLine(line)
+    );
   }
 
   function plannerUsedCbm(container) {
@@ -1560,6 +2146,10 @@
       id: `C-${sequence}`,
       type: key,
       capacity: CONTAINER_TYPES[key].capacity,
+      status: 'draft',
+      sailingDate: '',
+      port: '',
+      arrivedDate: '',
       assignments: [],
     });
     render();
@@ -1569,44 +2159,166 @@
   function removePlannerContainer(containerId) {
     const container = state.plannerContainers.find((row) => row.id === containerId);
     if (!container) return;
-    container.assignments.forEach((assignment) => {
-      state.plannerAssigned[assignment.lineId] = Math.max(
-        0,
-        (state.plannerAssigned[assignment.lineId] || 0) - assignment.units
-      );
-    });
+    if (!containerIsEditable(container)) {
+      showToast(`${container.id} is ${CONTAINER_STATUSES[containerStatusKey(container)].label.toLowerCase()} and locked.`);
+      return;
+    }
     state.plannerContainers = state.plannerContainers.filter((row) => row.id !== containerId);
+    syncPlannerAssigned();
     render();
   }
 
   function unassignPlanner(containerId, lineId, assignmentIndex) {
     const container = state.plannerContainers.find((row) => row.id === containerId);
     if (!container) return;
+    if (!containerIsEditable(container)) {
+      showToast(`${container.id} is ${CONTAINER_STATUSES[containerStatusKey(container)].label.toLowerCase()} and locked.`);
+      return;
+    }
     const index = Number(assignmentIndex);
     const assignment = container.assignments[index];
     if (!assignment) return;
-    state.plannerAssigned[assignment.lineId] = Math.max(
-      0,
-      (state.plannerAssigned[assignment.lineId] || 0) - assignment.units
-    );
     container.assignments.splice(index, 1);
+    syncPlannerAssigned();
     render();
   }
 
-  function planLine(lineId, containerId) {
+  function clearPlanner() {
+    const removable = state.plannerContainers.filter((container) => containerIsEditable(container));
+    if (!removable.length) {
+      showToast('No draft or booked planning to clear.');
+      return;
+    }
+    const removedBlocks = removable.reduce((sum, container) => sum + container.assignments.length, 0);
+    state.plannerContainers = state.plannerContainers.filter((container) => !containerIsEditable(container));
+    state.plannerSelectedLineId = null;
+    syncPlannerAssigned();
+    render();
+    showToast(
+      `Cleared ${formatNumber(removedBlocks)} draft/booked block${removedBlocks === 1 ? '' : 's'}. ` +
+      'Shipped and arrived containers were kept.'
+    );
+  }
+
+  function updateContainerFieldFromEvent(event) {
+    const dataset = event.target.dataset || {};
+    const containerId = dataset.containerSailing || dataset.containerPort;
+    if (!containerId) return false;
+    const container = state.plannerContainers.find((row) => row.id === containerId);
+    if (container) {
+      if (dataset.containerSailing) container.sailingDate = event.target.value;
+      if (dataset.containerPort) container.port = event.target.value;
+    }
+    return true;
+  }
+
+  function syncContainerFieldsFromDom(containerId) {
+    const container = state.plannerContainers.find((row) => row.id === containerId);
+    if (!container) return null;
+    const sailing = document.querySelector(`[data-container-sailing="${containerId}"]`);
+    if (sailing) container.sailingDate = sailing.value;
+    const port = document.querySelector(`[data-container-port="${containerId}"]`);
+    if (port) container.port = port.value;
+    return container;
+  }
+
+  function markContainerBooked(containerId) {
+    const container = syncContainerFieldsFromDom(containerId);
+    if (!container) return;
+    const statusKey = containerStatusKey(container);
+    if (!containerIsEditable(container)) {
+      showToast(`${container.id} is already ${CONTAINER_STATUSES[statusKey].label.toLowerCase()}.`);
+      return;
+    }
+    if (!container.assignments.length) {
+      showToast('Add at least one block before booking this container.');
+      return;
+    }
+    if (statusKey === 'booked') {
+      showToast(`${container.id} is already booked.`);
+      return;
+    }
+    container.status = 'booked';
+    render();
+    showToast(`${container.id} marked booked${container.sailingDate ? ` · sailing ${formatDate(container.sailingDate)}` : ''}.`);
+  }
+
+  function markContainerShipped(containerId) {
+    const container = syncContainerFieldsFromDom(containerId);
+    if (!container) return;
+    const statusKey = containerStatusKey(container);
+    if (statusKey === 'shipped' || statusKey === 'arrived') {
+      showToast(`${container.id} is already ${CONTAINER_STATUSES[statusKey].label.toLowerCase()}.`);
+      return;
+    }
+    if (!container.assignments.length) {
+      showToast('Add at least one block before shipping this container.');
+      return;
+    }
+    if (!container.sailingDate) container.sailingDate = AS_OF;
+    container.status = 'shipped';
+    syncPlannerAssigned();
+    clearSummaryCache();
+    render();
+    const units = containerUnits(container);
+    showToast(
+      `${container.id} marked shipped — ${formatNumber(units)} units moved to In transit` +
+      `${container.sailingDate ? ` (sailing ${formatDate(container.sailingDate)})` : ''}.`
+    );
+  }
+
+  function markContainerArrived(containerId) {
+    const container = syncContainerFieldsFromDom(containerId);
+    if (!container) return;
+    const statusKey = containerStatusKey(container);
+    if (statusKey !== 'shipped') {
+      showToast('Mark the container as shipped before marking it arrived.');
+      return;
+    }
+    if (!container.assignments.length) {
+      showToast('This container has no blocked units to receive.');
+      return;
+    }
+    const units = containerUnits(container);
+    container.status = 'arrived';
+    container.arrivedDate = AS_OF;
+    container.assignments.forEach((assignment) => {
+      state.simulatedLineQty[assignment.lineId] =
+        (state.simulatedLineQty[assignment.lineId] || 0) + assignment.units;
+    });
+    syncPlannerAssigned();
+    clearSummaryCache();
+    render();
+    showToast(
+      `${container.id} marked arrived — ${formatNumber(units)} units added to received balances in this session.`
+    );
+  }
+
+  function requestedBlockUnits(lineId) {
+    const input = document.querySelector(`[data-block-qty="${lineId}"]`);
+    const value = input ? Number(input.value) : null;
+    return value && value > 0 ? value : null;
+  }
+
+  function planLine(lineId, containerId, requestedUnits = null) {
     const line = lineById.get(Number(lineId));
     const container = state.plannerContainers.find((row) => row.id === containerId);
     if (!line || !container) return;
 
+    if (!containerIsEditable(container)) {
+      showToast(`${container.id} is ${CONTAINER_STATUSES[containerStatusKey(container)].label.toLowerCase()} and locked.`);
+      return;
+    }
+
     const remaining = plannerRemaining(line);
     if (remaining <= 0) {
-      showToast('This line is already fully planned.');
+      showToast('This line is already fully planned or shipped.');
       return;
     }
 
     const carton = line.boxQty > 0 ? line.boxQty : 1;
     const cbmPerUnit = line.cbm > 0 && line.ordered > 0 ? line.cbm / line.ordered : null;
-    let units = remaining;
+    let units = requestedUnits != null && requestedUnits > 0 ? Math.min(remaining, requestedUnits) : remaining;
 
     if (cbmPerUnit != null) {
       const availableCbm = Math.max(0, container.capacity - plannerUsedCbm(container));
@@ -1614,19 +2326,40 @@
       units = Math.min(units, maxUnits);
     }
 
-    units = Math.floor(units / carton) * carton;
+    const requested = units;
+    const snapped = Math.floor(units / carton) * carton;
+    if (snapped > 0) {
+      units = snapped;
+    } else if (remaining < carton && requested === remaining) {
+      // A final balance smaller than one carton can be planned as a partial
+      // block; otherwise a sub-carton remainder would be impossible to plan.
+      units = remaining;
+    } else {
+      units = 0;
+    }
 
     if (units <= 0) {
-      showToast(`Not enough CBM left in ${container.id} for one full carton.`);
+      const capacityUnits = cbmPerUnit == null
+        ? null
+        : Math.floor(Math.max(0, container.capacity - plannerUsedCbm(container)) / cbmPerUnit);
+      const cbmLimited = capacityUnits != null && capacityUnits < carton;
+      showToast(
+        cbmLimited
+          ? `Not enough CBM left in ${container.id} for this block.`
+          : `Block qty must be at least one full carton (${formatNumber(carton)} units).`
+      );
       return;
     }
 
     const cbm = cbmPerUnit == null ? null : units * cbmPerUnit;
-    container.assignments.push({ lineId: line.id, units, cbm, carton });
-    state.plannerAssigned[line.id] = (state.plannerAssigned[line.id] || 0) + units;
+    const blockNumber = state.plannerContainers
+      .flatMap((row) => row.assignments)
+      .filter((assignment) => assignment.lineId === line.id).length + 1;
+    container.assignments.push({ lineId: line.id, units, cbm, carton, block: `B${blockNumber}` });
+    syncPlannerAssigned();
     state.plannerSelectedLineId = null;
     render();
-    showToast(`${formatNumber(units)} units of ${line.itemId} planned into ${container.id}${cbm == null ? ' — CBM missing' : ''}.`);
+    showToast(`${formatNumber(units)} units of ${line.itemId} planned into ${container.id} as block B${blockNumber}${cbm == null ? ' — CBM missing' : ''}.`);
   }
 
   function renderPlannerLine(item) {
@@ -1638,6 +2371,7 @@
 
     if (line.cbm <= 0) tags.push(renderTag('bad', 'CBM missing', 'This line cannot be counted in the container fill.'));
     if (line.boxQty <= 0) tags.push(renderTag('wn', 'Box qty missing', 'Carton snapping falls back to one unit.'));
+    if (line.boxQty > 0 && remaining < carton) tags.push(renderTag('wn', 'Final partial carton', 'The remaining balance is smaller than one carton; it can be planned as a partial block.'));
     if (line.isCheckData) tags.push(renderTag('bad', 'Check data'));
 
     return `
@@ -1649,10 +2383,23 @@
       >
         <b class="mono">${esc(line.itemId || '—')}</b> · ${esc(line.description || '—')}
         <div class="sub">
-          ${formatNumber(remaining)} u · ${formatNumber(Math.floor(remaining / carton))} carton${Math.floor(remaining / carton) === 1 ? '' : 's'} ·
+          ${formatNumber(remaining)} u remaining · ${formatNumber(Math.floor(remaining / carton))} carton${Math.floor(remaining / carton) === 1 ? '' : 's'} ·
           ${cbm == null ? 'CBM missing' : formatCbm(cbm)}
         </div>
         ${tags.length ? `<div>${tags.join(' ')}</div>` : ''}
+        <div class="block-split">
+          <span class="sub">Block qty</span>
+          <input
+            class="qty-input block-qty"
+            type="number"
+            min="1"
+            max="${remaining}"
+            step="1"
+            value="${remaining}"
+            data-block-qty="${line.id}"
+            title="Set a smaller quantity to split this line across containers"
+          >
+        </div>
       </div>`;
   }
 
@@ -1671,22 +2418,56 @@
       .map(([key, value]) => `<option value="${key}">${value.label} · ${value.capacity} CBM</option>`)
       .join('');
 
+    const blockLabels = new Map();
+    const blockCounts = new Map();
+    state.plannerContainers.forEach((container) => {
+      container.assignments.forEach((assignment, index) => {
+        const number = (blockCounts.get(assignment.lineId) || 0) + 1;
+        blockCounts.set(assignment.lineId, number);
+        blockLabels.set(`${container.id}:${index}`, `B${number}`);
+      });
+    });
+
+    const plannedUnits = state.plannerContainers
+      .filter((container) => containerIsEditable(container))
+      .reduce((sum, container) => sum + containerUnits(container), 0);
+    const plannedBlocks = state.plannerContainers
+      .filter((container) => containerIsEditable(container))
+      .reduce((sum, container) => sum + container.assignments.length, 0);
+    const shippedUnits = state.plannerContainers
+      .filter((container) => containerStatusKey(container) === 'shipped')
+      .reduce((sum, container) => sum + containerUnits(container), 0);
+    const shippedBlocks = state.plannerContainers
+      .filter((container) => containerStatusKey(container) === 'shipped')
+      .reduce((sum, container) => sum + container.assignments.length, 0);
+    const arrivedUnits = state.plannerContainers
+      .filter((container) => containerStatusKey(container) === 'arrived')
+      .reduce((sum, container) => sum + containerUnits(container), 0);
+    const statusCounts = Object.keys(CONTAINER_STATUSES).reduce((counts, key) => {
+      counts[key] = state.plannerContainers.filter((container) => containerStatusKey(container) === key).length;
+      return counts;
+    }, {});
+    const remainingUnits = items.reduce((sum, item) => sum + item.remaining, 0);
+
     return `
       ${renderHeader(
         'Planner (concept)',
-        `Open Import lines with no receipt. Plans live only in this browser session. Data as of ${AS_OF_LABEL}.`,
+        `Open Import balances that are not covered by an open receipt — including remainders of partly received POs. Plans live only in this browser session. Data as of ${AS_OF_LABEL}.`,
         renderTag('wn', 'Concept')
       )}
 
       <div class="card banner">
         <b>Concept: planning data does not exist in today’s systems. Plans live only in this session.</b>
-        <div class="sub">Container types and capacities are assumptions: 40HC 68 CBM, 40ST 58 CBM, 20GP 28 CBM. They are not in the CSV exports.</div>
+        <div class="sub">Container types and capacities are assumptions: 40HC 68 CBM, 40ST 58 CBM, 20GP 28 CBM. They are not in the CSV exports. Set a smaller <b>Block qty</b> before assigning to split one PO line across containers. Set a sailing date and port, then <b>Mark as shipped</b> to move assigned units into In transit. <b>Mark arrived</b> adds them to received balances in this session.</div>
       </div>
 
       <div class="card row" style="justify-content:flex-start">
         <select id="planner-container-type">${typeOptions}</select>
         <button class="p" data-action="add-container">Add container</button>
-        <span class="sub">${formatNumber(items.length)} open line${items.length === 1 ? '' : 's'} with no receipt</span>
+        ${statusCounts.draft + statusCounts.booked ? `<button class="s" data-action="clear-plan" title="Removes draft and booked containers only. Shipped and arrived containers stay.">Clear draft/booked</button>` : ''}
+        <span class="sub">${formatNumber(items.length)} open line${items.length === 1 ? '' : 's'} awaiting a plan</span>
+        <span class="sub">${formatNumber(plannedBlocks)} active block${plannedBlocks === 1 ? '' : 's'} · ${formatNumber(plannedUnits)} units planned · ${formatNumber(shippedBlocks)} shipped block${shippedBlocks === 1 ? '' : 's'} (${formatNumber(shippedUnits)} units) · ${formatNumber(arrivedUnits)} units arrived · ${formatNumber(remainingUnits)} units still unplanned</span>
+        <span class="sub">Containers: ${formatNumber(statusCounts.draft)} draft · ${formatNumber(statusCounts.booked)} booked · ${formatNumber(statusCounts.shipped)} shipped · ${formatNumber(statusCounts.arrived)} arrived</span>
         ${missingCbmAssignments ? renderTag('bad', `${missingCbmAssignments} assigned line${missingCbmAssignments === 1 ? '' : 's'} with CBM missing`, 'The fill bar excludes CBM-missing assignments.') : ''}
       </div>
 
@@ -1697,7 +2478,7 @@
             ${Array.from(byPo.values()).map((group) => `
               <div class="gh">${esc(group.po.po)} · ${esc(group.po.vendorId || '—')}</div>
               ${group.items.map(renderPlannerLine).join('')}
-            `).join('') || '<div class="sub">No open Import lines without a receipt in this filter.</div>'}
+            `).join('') || '<div class="sub">No open Import balances without an open receipt in this filter.</div>'}
           </div>
         </div>
 
@@ -1706,13 +2487,44 @@
             const used = plannerUsedCbm(container);
             const fill = (used / container.capacity) * 100;
             const missing = plannerMissingCbm(container);
+            const statusKey = containerStatusKey(container);
+            const status = CONTAINER_STATUSES[statusKey];
+            const editable = containerIsEditable(container);
+            const units = containerUnits(container);
+            const hasBlocks = container.assignments.length > 0;
+            const locked = !editable || fill > 100;
+            const sailingLabel = container.sailingDate ? formatDate(container.sailingDate) : '';
+            const portLabel = container.port ? esc(container.port) : '';
+            const statusNote = statusKey === 'draft'
+              ? 'Draft — not booked yet.'
+              : statusKey === 'booked'
+                ? `Booked${sailingLabel ? ` · sailing ${sailingLabel}` : ''}${portLabel ? ` · ${portLabel}` : ''} — waiting to sail.`
+                : statusKey === 'shipped'
+                  ? `Shipped${sailingLabel ? ` · sailing ${sailingLabel}` : ''}${portLabel ? ` · ${portLabel}` : ''} — units are in transit.`
+                  : `Arrived${container.arrivedDate ? ` ${formatDate(container.arrivedDate)}` : ''}${portLabel ? ` · ${portLabel}` : ''} — units added to received balances.`;
             return `
               <div class="card">
                 <div class="row">
-                  <b>${esc(container.id)} · ${esc(container.type)}</b>
-                  <button class="s" data-action="remove-container:${attr(container.id)}">Remove</button>
+                  <div><b>${esc(container.id)} · ${esc(container.type)}</b> ${renderTag(status.variant, status.label)}</div>
+                  <div class="container-actions">
+                    ${statusKey === 'draft' ? `<button class="s" data-action="book-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Mark this container as booked. Units stay planned.">Mark booked</button>` : ''}
+                    ${statusKey === 'draft' || statusKey === 'booked' ? `<button class="p" data-action="ship-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Move this container's planned units into In transit.">Mark as shipped</button>` : ''}
+                    ${statusKey === 'shipped' ? `<button class="p" data-action="arrive-container:${attr(container.id)}" title="Add this container's units to received balances in this session.">Mark arrived</button>` : ''}
+                    ${editable ? `<button class="s" data-action="remove-container:${attr(container.id)}" title="Remove this draft or booked container.">Remove</button>` : ''}
+                  </div>
                 </div>
-                <div class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(container.assignments.reduce((sum, assignment) => sum + assignment.units, 0))} units</div>
+                <div class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</div>
+                <div class="container-meta">
+                  <label>
+                    <span class="field-label">Sailing date</span>
+                    <input type="date" data-container-sailing="${attr(container.id)}" value="${attr(container.sailingDate || '')}">
+                  </label>
+                  <label>
+                    <span class="field-label">Port</span>
+                    <input type="text" data-container-port="${attr(container.id)}" value="${attr(container.port || '')}" placeholder="e.g. Los Angeles">
+                  </label>
+                </div>
+                <div class="sub container-note">${statusNote}</div>
                 <div class="bar">
                   <i class="${fill > 100 ? 'r' : ''}" style="width:${Math.min(100, fill)}%"></i>
                 </div>
@@ -1720,17 +2532,21 @@
                   ${fill.toFixed(1)}% full${fill > 100 ? ' · OVER CAPACITY' : ''}
                   ${missing ? ` · ${missing} CBM-missing assignment${missing === 1 ? '' : 's'}` : ''}
                 </div>
-                <div class="zone${fill > 100 ? ' lock' : ''}" data-planner-zone="${attr(container.id)}">
+                <div class="zone${locked ? ' lock' : ''}" data-planner-zone="${attr(container.id)}">
                   ${container.assignments.map((assignment, index) => {
                     const line = lineById.get(assignment.lineId);
+                    const block = blockLabels.get(`${container.id}:${index}`) || 'B1';
                     return `
-                      <div class="blk">
-                        <b class="mono">${esc(line ? line.itemId : '—')}</b>
+                      <div class="blk l2">
+                        ${renderTag('', block)} <b class="mono">${esc(line ? line.itemId : '—')}</b>
+                        ${line && line.poRef ? `<span class="sub">· ${esc(line.poRef.po)}</span>` : ''}
                         · ${formatNumber(assignment.units)} u
                         · ${assignment.cbm == null ? 'CBM missing' : formatCbm(assignment.cbm)}
-                        <button class="s" data-action="unassign:${attr(container.id)}:${assignment.lineId}:${index}">Remove</button>
+                        ${editable ? `<button class="s" data-action="unassign:${attr(container.id)}:${assignment.lineId}:${index}">Remove</button>` : ''}
                       </div>`;
-                  }).join('') || '<div class="sub">Drop lines here or tap a line then tap this container.</div>'}
+                  }).join('') || `<div class="sub">${editable ? 'Drop lines here, or tap a line then tap this container.' : 'No blocks on this container.'}</div>`}
+                  ${editable && container.assignments.length ? '<div class="sub">Drop more lines here, or tap a line then tap this container.</div>' : ''}
+                  ${!editable ? `<div class="sub">${statusKey === 'shipped' ? 'Locked — assigned units are in transit.' : 'Locked — assigned units have arrived.'}</div>` : ''}
                 </div>
               </div>`;
           }).join('') || '<div class="card sub">No containers yet. Add one to start planning.</div>'}
@@ -1738,7 +2554,7 @@
       </div>
 
       <div class="card sub">
-        Plans are not saved and are not sent to any system. Quantities snap down to whole cartons using BoxQty; ${formatNumber(HEALTH.cartonMultiple.ok)} of ${formatNumber(HEALTH.cartonMultiple.total)} Import lines are exact carton multiples, ${formatNumber(HEALTH.cartonMultiple.missingBoxQty)} have no BoxQty, and ${formatNumber(HEALTH.cartonMultiple.total - HEALTH.cartonMultiple.ok - HEALTH.cartonMultiple.missingBoxQty)} are not exact multiples.
+        Plans are not saved and are not sent to any system. Container statuses, sailing dates and ports are session-only simulations. Quantities snap down to whole cartons using BoxQty, except a final balance smaller than one carton, which can be planned as a partial block. ${formatNumber(HEALTH.cartonMultiple.ok)} of ${formatNumber(HEALTH.cartonMultiple.total)} Import lines are exact carton multiples, ${formatNumber(HEALTH.cartonMultiple.missingBoxQty)} have no BoxQty, and ${formatNumber(HEALTH.cartonMultiple.total - HEALTH.cartonMultiple.ok - HEALTH.cartonMultiple.missingBoxQty)} are not exact multiples. Planned quantities reduce the red <b>Unplanned</b> balances on Purchase orders. Marking a container shipped moves its units from Planned to In transit; marking it arrived adds them to Received.
       </div>`;
   }
 
@@ -1749,6 +2565,7 @@
   function followUpBuckets() {
     const rows = dashboardOrders();
     const buckets = {
+      unplanned: [],
       nothing: [],
       overdue: [],
       old: [],
@@ -1756,8 +2573,21 @@
     };
 
     rows.forEach((row) => {
-      const summary = row.summary;
-      if (summary.status === 'Unshipped balance') buckets.nothing.push(row);
+      const { po, summary } = row;
+      const atRisk = poIsAtRisk(po, summary);
+      const hasOpenReceipt = poHasOpenReceipt(po);
+      const shipped = shippedUnitsForPo(po);
+      const planned = plannedUnitsForPo(po);
+      if (atRisk) buckets.unplanned.push(row);
+      if (
+        summary.balance > 0
+        && !hasOpenReceipt
+        && !atRisk
+        && planned > 0
+        && summary.balance > shipped
+      ) {
+        buckets.nothing.push(row);
+      }
       if (summary.status === 'Overdue') buckets.overdue.push(row);
       if (summary.status === 'Not shipped yet' && summary.old) buckets.old.push(row);
     });
@@ -1770,6 +2600,14 @@
       .filter((receipt) => !state.vendorFilter || receipt.vendorId === state.vendorFilter);
 
     return buckets;
+  }
+
+  function followUpTotal(buckets) {
+    const poKeys = new Set();
+    ['unplanned', 'nothing', 'overdue', 'old'].forEach((key) => {
+      buckets[key].forEach((row) => poKeys.add(row.po.po));
+    });
+    return poKeys.size + buckets.unmatched.length;
   }
 
   function groupByVendor(rows) {
@@ -1793,6 +2631,8 @@
               <th class="n">OPEN LINES</th>
               <th class="n">OPEN VALUE</th>
               <th class="n">BALANCE</th>
+              <th class="n">PLANNED</th>
+              <th class="n">UNPLANNED</th>
               <th>ETA</th>
               <th class="n">DAYS LATE</th>
               <th class="n">PO AGE</th>
@@ -1802,13 +2642,19 @@
           <tbody>
             ${rows.map(({ po, summary }) => {
               const late = summary.nextEta ? daysLate(summary.nextEta) : null;
+              const hasOpenReceipt = poHasOpenReceipt(po);
+              const shipped = shippedUnitsForPo(po);
+              const planned = Math.max(0, Math.min(plannedUnitsForPo(po), summary.balance - shipped));
+              const unplanned = unplannedUnitsForPo(po);
               return `
                 <tr>
-                  <td><b>${esc(po.po)}</b>${summary.old ? ` ${renderTag('wn', 'Old')}` : ''}</td>
+                  <td><b>${esc(po.po)}</b>${summary.old ? ` ${renderTag('wn', 'Old')}` : ''}${shipped > 0 ? ` ${renderTag('info', 'In container', 'Some or all open units are on a container marked Shipped.')}` : ''}</td>
                   <td title="${attr(purchaserTitle(po.purchaser))}">${esc(po.buyer || '—')}</td>
                   <td class="n">${formatNumber(summary.openLines)}</td>
                   <td class="n">${formatValue(summary.openValue)}</td>
                   <td class="n">${formatNumber(summary.balance)}</td>
+                  <td class="n">${planned ? formatNumber(planned) : '—'}</td>
+                  <td class="n">${hasOpenReceipt ? '<span class="sub" title="Covered by an open receipt">In transit</span>' : unplanned > 0 ? `<span class="late">${formatNumber(unplanned)}</span>` : '0'}</td>
                   <td>${summary.nextEta ? `${formatDate(summary.nextEta)}<br><span class="sub">${esc(relativeEta(summary.nextEta))}</span>` : '—'}</td>
                   <td class="n">${late != null && late > 0 ? renderTag('bad', late) : '—'}</td>
                   <td class="n">${summary.ageDays == null ? '—' : formatNumber(summary.ageDays)}</td>
@@ -1835,8 +2681,44 @@
       </div>`;
   }
 
+  function renderReminderLog() {
+    if (!state.reminders.length) return '';
+    return `
+      <div class="card">
+        <div class="row">
+          <div>
+            <h2>Reminder log</h2>
+            <div class="sub">Prototype actions recorded in this browser session. No email is actually sent.</div>
+          </div>
+          <button class="s" data-action="clear-reminders">Clear log</button>
+        </div>
+        <div class="sc" style="margin-top:10px">
+          <table style="min-width:480px">
+            <thead>
+              <tr>
+                <th>VENDOR</th>
+                <th class="n">ITEMS</th>
+                <th>CHANNEL</th>
+                <th>TIME</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.reminders.map((reminder) => `
+                <tr>
+                  <td><b>${esc(reminder.vendor)}</b></td>
+                  <td class="n">${formatNumber(reminder.count)}</td>
+                  <td>${esc(reminder.channel)}</td>
+                  <td>${esc(reminder.time)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
   function renderFollowUps() {
     const buckets = followUpBuckets();
+    const unplannedGroups = groupByVendor(buckets.unplanned);
     const nothingGroups = groupByVendor(buckets.nothing);
     const overdueGroups = groupByVendor(buckets.overdue);
     const oldGroups = groupByVendor(buckets.old);
@@ -1881,7 +2763,7 @@
                 <tr>
                   <td class="mono">${esc(receipt.invoiceNo)}</td>
                   <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
-                  <td>${receipt.receiptDate ? formatDate(receipt.receiptDate) : '<span class="sub">Open</span>'}</td>
+                  <td>${renderReceiptReceivedDate(receipt)}</td>
                   <td class="mono">${esc(receipt.tracking || '—')}</td>
                   <td>${esc(receipt.type || '—')}</td>
                   <td>${renderReceiptStatusTag(receipt)}</td>
@@ -1892,42 +2774,47 @@
         </div>
       </div>`;
 
-    const total =
-      buckets.nothing.length +
-      buckets.overdue.length +
-      buckets.old.length +
-      buckets.unmatched.length;
+    const total = followUpTotal(buckets);
 
     return `
       ${renderHeader(
         'Follow-ups',
-        `${formatNumber(total)} items in the current filters. Categories are ordered by urgency; unmatched receipts are shown across all segments. One reminder per vendor/category remains a prototype action.`,
+        `${formatNumber(total)} unique items in the current filters. Categories overlap; a PO can appear in more than one lens. Unmatched receipts are shown across all segments. Reminders are prototype actions logged in this session.`,
         `<div class="sub">${SEGMENT_LABELS[state.segmentFilter] || 'All segments'}</div>`
       )}
 
+      ${renderReminderLog()}
+
       ${renderFollowUpCategory(
-        '1. Open balance — no shipment',
-        'Some quantity was received, a balance remains, and no receipt is still open — nothing is scheduled to close the gap. Unlike “Not shipped yet”, at least one shipment already arrived.',
+        '1. At risk — not fully planned',
+        'A balance remains, no receipt is still open, and some balance is neither on a shipped container nor assigned to a draft or booked container. This includes POs that never shipped, remainders of partly received POs and remainders of partly shipped containers — the balance nobody is tracking.',
+        unplannedGroups,
+        renderPoGroup
+      )}
+
+      ${renderFollowUpCategory(
+        '2. Open balance — already planned',
+        'A balance remains and no receipt is still open. The part not already shipped is assigned to a draft or booked container. This is the “waiting for the next container” list.',
         nothingGroups,
         renderPoGroup
       )}
 
       ${renderFollowUpCategory(
-        '2. Past ETA',
+        '3. Past ETA',
         'At least one open receipt has an ETA before the 2 Nov 2026 data date.',
         overdueGroups,
         renderPoGroup
       )}
 
       ${renderFollowUpCategory(
-        '3. Not shipped yet and Old',
+        '4. Not shipped yet and Old',
         'No receipt at all and the PO is more than 90 days old.',
         oldGroups,
         renderPoGroup
       )}
 
       ${renderFollowUpCategory(
-        '4. Receipts unmatched',
+        '5. Receipts unmatched',
         'Receipts with no exact or suffix-normalised PO match. They are not forced onto a PO and are shown across all segments because they have no PO/FOB segment.',
         unmatched,
         renderUnmatchedGroup
@@ -1945,13 +2832,15 @@
       ['shipments', 'Shipments'],
       ['planner', 'Planner (concept)'],
     ]],
-    ['RECEIVE', [['receive', 'Receive (simulated)']]],
+    ['RECEIVE', [
+      ['receive', 'Receive one receipt'],
+      ['import', 'Import packing list'],
+    ]],
     ['ACT', [['followup', 'Follow-ups']]],
   ];
 
   function followUpCount() {
-    const buckets = followUpBuckets();
-    return buckets.nothing.length + buckets.overdue.length + buckets.old.length + buckets.unmatched.length;
+    return followUpTotal(followUpBuckets());
   }
 
   function renderNavigation(currentView) {
@@ -1985,6 +2874,7 @@
     shipments: renderShipments,
     planner: renderPlanner,
     receive: renderReceive,
+    import: renderImport,
     followup: renderFollowUps,
   };
 
@@ -2075,7 +2965,8 @@
         zone.classList.remove('hot');
         const containerId = zone.dataset.plannerZone;
         if (!containerId) return;
-        planLine(Number(event.dataTransfer.getData('text/plain')), containerId);
+        const lineId = Number(event.dataTransfer.getData('text/plain'));
+        planLine(lineId, containerId, requestedBlockUnits(lineId));
       };
     });
   }
@@ -2175,6 +3066,18 @@
         addPlannerContainer(document.getElementById('planner-container-type')?.value || '40HC');
         break;
 
+      case 'book-container':
+        markContainerBooked(args[0]);
+        break;
+
+      case 'ship-container':
+        markContainerShipped(args[0]);
+        break;
+
+      case 'arrive-container':
+        markContainerArrived(args[0]);
+        break;
+
       case 'remove-container':
         removePlannerContainer(args[0]);
         break;
@@ -2183,12 +3086,36 @@
         unassignPlanner(args[0], Number(args[1]), Number(args[2]));
         break;
 
+      case 'clear-plan':
+        clearPlanner();
+        break;
+
       case 'confirm-receive':
         confirmReceive();
         break;
 
-      case 'remind':
-        showToast(`Reminder sent to ${args[0]} for ${args[1]} item${args[1] === '1' ? '' : 's'} (prototype).`);
+      case 'apply-import':
+        applyImport();
+        break;
+
+      case 'remind': {
+        const vendor = args[0] || 'vendor';
+        const count = Number(args[1]) || 0;
+        state.reminders.unshift({
+          vendor,
+          count,
+          channel: 'Email (mock)',
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        });
+        render();
+        showToast(`Reminder logged for ${vendor} · ${count} item${count === 1 ? '' : 's'} (prototype).`);
+        break;
+      }
+
+      case 'clear-reminders':
+        state.reminders = [];
+        render();
+        showToast('Reminder log cleared.');
         break;
 
       default:
@@ -2199,10 +3126,22 @@
   document.addEventListener('click', (event) => {
     /* Planner: select a line, then tap a container. */
     const plannerLine = event.target.closest('[data-planner-line]');
-    if (plannerLine && !event.target.closest('[data-action]')) {
+    if (plannerLine && !event.target.closest('[data-action]') && !event.target.closest('input, select, textarea')) {
       const id = Number(plannerLine.dataset.plannerLine);
       state.plannerSelectedLineId = state.plannerSelectedLineId === id ? null : id;
       render();
+      return;
+    }
+
+    /* Editing a block quantity also selects that line, without re-rendering
+       and losing the value or focus. */
+    const blockQtyInput = event.target.closest('[data-block-qty]');
+    if (blockQtyInput) {
+      const id = Number(blockQtyInput.dataset.blockQty);
+      state.plannerSelectedLineId = id;
+      document.querySelectorAll('[data-planner-line]').forEach((element) => {
+        element.classList.toggle('sel', Number(element.dataset.plannerLine) === id);
+      });
       return;
     }
 
@@ -2210,7 +3149,7 @@
     if (plannerZone && state.plannerSelectedLineId !== null && !event.target.closest('[data-action]')) {
       const containerId = plannerZone.dataset.plannerZone;
       if (containerId) {
-        planLine(state.plannerSelectedLineId, containerId);
+        planLine(state.plannerSelectedLineId, containerId, requestedBlockUnits(state.plannerSelectedLineId));
         return;
       }
     }
@@ -2226,6 +3165,8 @@
   let shipmentSearchTimer = null;
 
   document.addEventListener('input', (event) => {
+    if (updateContainerFieldFromEvent(event)) return;
+
     if (event.target.id === 'order-search') {
       clearTimeout(searchTimer);
       const value = event.target.value;
@@ -2248,6 +3189,8 @@
   });
 
   document.addEventListener('change', (event) => {
+    if (updateContainerFieldFromEvent(event)) return;
+
     switch (event.target.id) {
       case 'vendor-filter':
         state.vendorFilter = event.target.value;
@@ -2313,6 +3256,12 @@
 
       case 'receive-receipt':
         state.receiveReceiptId = event.target.value;
+        render();
+        break;
+
+      case 'import-document':
+        state.importGroupKey = event.target.value;
+        state.importPreview = null;
         render();
         break;
 
