@@ -43,9 +43,11 @@ The page has three segmented views with counts:
 - **In transit** — Shipped containers created in Plan plus real receipt-export groups without a `ReceiptDate`. Real groups are collapsed by default, paginated 20 per page and show shared-container counts. Search covers container/tracking, invoice, PO and vendor; filters cover receipt type and the plain status labels (“On the way”, “Past ETA”, “No ETA”, “No matching PO”, “Invalid data”).
 - **Arrived** — Arrived containers created in Plan plus real receipt-export groups with a `ReceiptDate`. Uses the same grouping, search and type filters.
 
-Container detail uses `#containers/<id>`: a drawer on wide screens and a full-page view with a Back button on narrow screens. Closing restores the current view, filters and scroll position. The header shows the container/tracking number, type, vendor and PO counts, port, sailing date, ETA, warehouse, a Draft → Booked → Shipped → Arrived stepper and the next-step action. Contents are grouped by PO/item with Vendor, PO, Item, Ordered, In this container, Balance after and Result tags. Contents are read-only by default. A Booked container ships “as planned” by default; “Shipped differently” can reduce a line before arrival, and any shortfall returns to the PO balance. Marking it Arrived moves shipped units to Received and locks the container.
+Container detail uses `#containers/<id>`: a drawer on wide screens and a full-page view with a Back button on narrow screens. Closing restores the current view, filters and scroll position. The tracking header shows the container/tracking number, type, vendors, POs, port, sailing date, ETA, warehouse and a computed status message (on schedule, due today, days past ETA, or arrived). A horizontal Draft → Booked → Shipped → Arrived stepper reflects the existing container status values.
 
-Vendor details live in the detail panel with all fields from the old Vendor updates page: tracking/container, invoice/booking, vessel, ETD/ETA, port, warehouse, cartons, gross weight, CBM, status, source, contact and notes. Entries are editable per container. Existing browser-local Vendor updates are carried over by tracking number or PO, and any unmatched entries remain in a collapsed “Vendor updates not yet attached to a container” section. Older entries are never deleted.
+Below the stepper, a latest-first activity timeline records container creation, POs added, booking, shipment and arrival actions, plus ETA edits. Activity history is stored in the merged demo state; existing containers do not get invented historical events. Real receipt-export arrivals are dated from `ReceiptDate`. Shipment details, contents/shipped-quantity editing and documents are kept in a collapsed section so the tracking view stays concise. A Booked container ships “as planned” by default; “Shipped differently” can reduce a line before arrival, and any shortfall returns to the PO balance. Marking it Arrived moves shipped units to Received and locks the container.
+
+Shipment details are editable per container with invoice/booking, vessel, port, sailing date, ETA, warehouse and notes; the tracking number stays in the summary header. The old browser-local Vendor updates key is still read for migration and remains untouched by reset, but legacy update rows are no longer shown in the tracking panel.
 
 Documents are attached per container with an **Attach file** control. The list records file name, type and date for packing list, invoice or booking confirmation. Nothing is uploaded, read, OCR'd or parsed.
 
@@ -98,7 +100,7 @@ PO rows also get two planning tags: **Ariel needs to plan** when an unplanned li
 
 ## Persistence
 
-Merged demo state is stored under `ariel.containers.v1`: containers, plans, simulated receipts/quantities, PO confirmations and ready dates, vendor details and document metadata. The old `ariel.vendorUpdates.v1` key is read for migration and is left untouched by **Reset demo data**.
+Merged demo state is stored under `ariel.containers.v1`: containers, plans, simulated receipts/quantities, PO confirmations and ready dates, shipment details, document metadata and container activity history. The old `ariel.vendorUpdates.v1` key is read for migration and is left untouched by **Reset demo data**.
 
 ## Code layout
 
@@ -114,5 +116,5 @@ scripts/build_data.py    CSV → js/data.js generator
 
 - No data is imported or invented: container capacities are assumptions (40HC 68 CBM, 40ST 58 CBM, 20GP 28 CBM). There is no packing-list import, file parser, OCR or document ingestion. Attachments keep metadata only.
 - There is no live Google Sheets, Forms, Odoo or Ariel integration, no real email or messaging, no login/roles and no shared persistence. Reminders are logged in the session only. Demo state is stored in this browser only and is not shared across buyers or devices.
-- The CSV exports do not contain container status, sailing date, port, confirmation status, ready dates or vendor contact details; those fields exist only in this prototype and its browser-local state.
+- The CSV exports do not contain container status, sailing date, port, confirmation status, ready dates, vendor contact details or historical tracking activity; those fields exist only in this prototype and its browser-local state. Activity for real receipts is limited to recorded `ReceiptDate` arrivals.
 - The sidebar “Back to Ariel Analytics” is a placeholder link.

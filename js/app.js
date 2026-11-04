@@ -47,25 +47,6 @@
     'Not shipped yet',
   ];
 
-  const VENDOR_UPDATE_STATUSES = [
-    'In production',
-    'Ready to ship',
-    'Booked',
-    'Sailing',
-    'Delayed',
-    'Arrived',
-    'Documents pending',
-    'Other',
-  ];
-
-  const VENDOR_UPDATE_SOURCES = [
-    'Email',
-    'WhatsApp',
-    'Phone',
-    'Vendor portal',
-    'Other',
-  ];
-
   const VENDOR_UPDATE_STORAGE_KEY = 'ariel.vendorUpdates.v1';
   const DEMO_STORAGE_KEY = 'ariel.containers.v1';
 
@@ -253,9 +234,28 @@
     });
   }
 
+  function formatDateTime(value) {
+    const raw = String(value || '');
+    if (!raw) return '—';
+    if (!raw.includes('T')) return formatDate(raw);
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return formatDate(raw);
+    return date.toLocaleString('en-GB', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
   function todayIso() {
     const now = new Date();
     return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  }
+
+  function nowTimestamp() {
+    return new Date().toISOString();
   }
 
   function relativeEta(value) {
@@ -345,6 +345,7 @@
     lastRenderedDetailId: '',
     shippingLineEdit: '',
     containerDocuments: {},
+    containerActivity: {},
     vendorDetails: {},
     poConfirmations: {},
 
@@ -458,6 +459,13 @@
     state.containerDocuments = parsed.containerDocuments && typeof parsed.containerDocuments === 'object'
       ? parsed.containerDocuments
       : {};
+    state.containerActivity = parsed.containerActivity && typeof parsed.containerActivity === 'object'
+      ? Object.fromEntries(
+        Object.entries(parsed.containerActivity)
+          .filter(([, rows]) => Array.isArray(rows))
+          .map(([key, rows]) => [key, rows.filter((row) => row && typeof row === 'object')])
+      )
+      : {};
   }
 
   function persistDemoState() {
@@ -471,6 +479,7 @@
         poConfirmations: state.poConfirmations,
         vendorDetails: state.vendorDetails,
         containerDocuments: state.containerDocuments,
+        containerActivity: state.containerActivity,
       }));
     } catch (error) {
       /* The prototype still works in memory when storage is unavailable. */
@@ -1461,6 +1470,23 @@
     return { label: typed, capacity: CONTAINER_TYPES['40HC'].capacity };
   }
 
+  function containerActivityFor(key) {
+    const rows = state.containerActivity[key];
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  function addContainerActivity(key, type, title, remark = '', extra = {}) {
+    if (!key) return;
+    const rows = containerActivityFor(key).slice();
+    rows.push(Object.assign({
+      at: nowTimestamp(),
+      type,
+      title,
+      remark: String(remark || ''),
+    }, extra));
+    state.containerActivity[key] = rows;
+  }
+
   function addPlannerContainer(value) {
     const typed = String(value || '').trim();
     const resolved = resolvePlannerContainer(typed);
@@ -1493,6 +1519,12 @@
       assignments: [],
     });
     state.plannerActiveContainerId = `C-${sequence}`;
+    addContainerActivity(
+      `C-${sequence}`,
+      'created',
+      'Container created',
+      `${type} · ${CONTAINER_TYPES[typeKey].capacity} CBM`
+    );
     clearSummaryCache();
     persistDemoState();
     render();
@@ -1594,6 +1626,14 @@
       return;
     }
     container.status = 'booked';
+    addContainerActivity(
+      container.id,
+      'booked',
+      'Booking confirmed',
+      [container.sailingDate ? `Sailing ${formatDate(container.sailingDate)}` : '', container.port]
+        .filter(Boolean)
+        .join(' · ')
+    );
     clearSummaryCache();
     persistDemoState();
     render();
@@ -1614,11 +1654,17 @@
     }
     if (!container.sailingDate) container.sailingDate = AS_OF;
     container.status = 'shipped';
+    const units = containerUnits(container);
+    addContainerActivity(
+      container.id,
+      'shipped',
+      'Shipment marked as shipped',
+      [`${formatNumber(units)} units`, container.port].filter(Boolean).join(' · ')
+    );
     syncPlannerAssigned();
     clearSummaryCache();
     persistDemoState();
     render();
-    const units = containerUnits(container);
     showToast(
       `${container.name} marked shipped - ${formatNumber(units)} units moved to In transit` +
       `${container.sailingDate ? ` (sailing ${formatDate(container.sailingDate)})` : ''}.`
@@ -1644,6 +1690,17 @@
       state.simulatedLineQty[assignment.lineId] =
         (state.simulatedLineQty[assignment.lineId] || 0) + assignment.units;
     });
+    const arrivalDetails = state.vendorDetails[container.id] || {};
+    addContainerActivity(
+      container.id,
+      'arrived',
+      'Container arrived',
+      [
+        `${formatNumber(units)} units received`,
+        arrivalDetails.warehouse || '',
+        container.port || '',
+      ].filter(Boolean).join(' · ')
+    );
     syncPlannerAssigned();
     clearSummaryCache();
     persistDemoState();
@@ -1756,6 +1813,13 @@
     const blockNumber = state.plannerContainers
       .flatMap((row) => row.assignments)
       .filter((assignment) => assignment.lineId === line.id).length + 1;
+    const po = line.poRef;
+    const poAlreadyPlanned = po && container.assignments.some((assignment) => {
+      const existingLine = lineById.get(assignment.lineId);
+      return existingLine && existingLine.poRef && existingLine.poRef.po === po.po;
+    });
+    const poHasEvent = po && containerActivityFor(container.id)
+      .some((event) => event.type === 'po-added' && event.po === po.po);
     container.assignments.push({
       lineId: line.id,
       units,
@@ -1765,6 +1829,15 @@
       carton,
       block: `B${blockNumber}`,
     });
+    if (po && !poAlreadyPlanned && !poHasEvent) {
+      addContainerActivity(
+        container.id,
+        'po-added',
+        `PO ${po.po} added`,
+        po.vendorId ? `Vendor ${po.vendorId}` : '',
+        { po: po.po }
+      );
+    }
     syncPlannerAssigned();
     clearSummaryCache();
     persistDemoState();
@@ -2024,11 +2097,6 @@
     return record.group.isContainer ? `Container ${record.group.label}` : `Tracking no. ${record.group.label}`;
   }
 
-  function containerRecordHeaderLabel(record) {
-    if (record.kind === 'planner') return 'Container ID';
-    return record.group.isContainer ? 'Container' : 'Tracking no.';
-  }
-
   function containerRecordType(record) {
     if (record.kind === 'planner') return record.container.type;
     return Array.from(new Set(record.group.receipts.map((receipt) => receipt.type).filter(Boolean))).join(', ') || '—';
@@ -2127,15 +2195,58 @@
     const statusKey = record.kind === 'planner'
       ? containerStatusKey(record.container)
       : (realGroupReceived(record.group) ? 'arrived' : 'shipped');
-    const current = ['draft', 'booked', 'shipped', 'arrived'].indexOf(statusKey);
     const labels = ['Draft', 'Booked', 'Shipped', 'Arrived'];
+    const current = labels.findIndex((label) => label.toLowerCase() === statusKey);
     return `
-      <div class="container-stepper" aria-label="Container status ${attr(labels[current])}">
+      <ol class="container-stepper" aria-label="Container status ${attr(labels[current])}">
         ${labels.map((label, index) => `
-          <span class="container-step${index < current ? ' done' : ''}${index === current ? ' current' : ''}">
-            <i>${index < current ? '✓' : index + 1}</i>${esc(label)}
-          </span>`).join('')}
-      </div>`;
+          <li class="container-step${index < current ? ' done' : ''}${index === current ? ' current' : ' future'}"${index === current ? ' aria-current="step"' : ''}>
+            <i aria-hidden="true">${index < current ? '✓' : index + 1}</i>
+            <span>${esc(label)}</span>
+          </li>`).join('')}
+      </ol>`;
+  }
+
+  function containerTrackingStatus(record, details) {
+    const statusKey = record.kind === 'planner'
+      ? containerStatusKey(record.container)
+      : (realGroupReceived(record.group) ? 'arrived' : 'shipped');
+    if (statusKey === 'arrived') return { label: 'Arrived', variant: 'ok' };
+
+    const eta = details.eta || '';
+    const daysPast = eta ? diffDays(eta, todayIso()) : null;
+    if (daysPast !== null && daysPast > 0) {
+      return {
+        label: `${formatNumber(daysPast)} day${daysPast === 1 ? '' : 's'} past ETA`,
+        variant: 'bad',
+      };
+    }
+    if (daysPast === 0) return { label: 'Due today', variant: 'wn' };
+
+    if (statusKey === 'draft') {
+      return { label: 'Not yet booked', variant: eta ? 'info' : 'wn' };
+    }
+    if (statusKey === 'booked') {
+      return { label: eta ? 'Booked · on schedule' : 'Booked · ETA not set', variant: eta ? 'info' : 'wn' };
+    }
+    return { label: eta ? 'Moving as expected' : 'In transit · ETA not set', variant: eta ? 'ok' : 'wn' };
+  }
+
+  function compactTextList(values, limit = 3) {
+    const list = values.filter(Boolean);
+    if (!list.length) return '—';
+    const shown = list.slice(0, limit).join(', ');
+    const extra = list.length - limit;
+    return `${esc(shown)}${extra > 0 ? ` +${formatNumber(extra)}` : ''}`;
+  }
+
+  function renderContainerPos(pos, limit = 3) {
+    if (!pos.length) return '—';
+    const shown = pos.slice(0, limit)
+      .map((po) => `<a href="#orders" data-action="openpo:${attr(po.po)}">${esc(po.po)}</a>`)
+      .join(', ');
+    const extra = pos.length - limit;
+    return `<span title="${attr(pos.map((po) => po.po).join(', '))}">${shown}${extra > 0 ? ` +${formatNumber(extra)}` : ''}</span>`;
   }
 
   function renderContainerDetailHeader(record) {
@@ -2143,27 +2254,28 @@
     const vendors = containerRecordVendors(record);
     const pos = containerRecordPos(record);
     const sailing = details.etd || (record.kind === 'planner' ? record.container.sailingDate : '');
+    const trackingStatus = containerTrackingStatus(record, details);
     const trackingTag = record.kind === 'real' && !record.group.isContainer
       ? renderTag('wn', 'LCL / carrier reference', 'This receipt export value is not a standard container number.')
       : '';
     const nameField = record.kind === 'planner'
       ? `
         <label class="container-name-field">
-          <span class="field-label">Container ID</span>
+          <span class="field-label">Container ID / tracking no.</span>
           <input type="text" data-container-name="${attr(record.container.id)}" value="${attr(record.container.name)}">
         </label>`
       : `
         <div>
-          <div class="sub">${esc(containerRecordHeaderLabel(record))}</div>
+          <div class="field-label">Container ID / tracking no.</div>
           <div class="container-id-value"><b class="mono">${esc(record.group.label)}</b> ${trackingTag}</div>
         </div>`;
 
     return `
-      <div class="container-detail-header">
+      <div class="container-detail-header container-tracking-header">
         <div class="row">
           <div>
-            <div class="sub">${record.kind === 'planner' ? 'Planned container' : 'Shipment record'}</div>
-            <h2>${esc(containerRecordLabel(record))}</h2>
+            <h2>Container tracking</h2>
+            <div class="tracking-status ${trackingStatus.variant}" role="status">${esc(trackingStatus.label)}</div>
           </div>
           <div class="row container-detail-actions">
             ${containerNextAction(record)}
@@ -2171,19 +2283,85 @@
           </div>
         </div>
 
-        <div class="detail-grid container-detail-grid">
+        <div class="detail-grid container-detail-grid container-tracking-grid">
           <div>${nameField}</div>
-          <div><div class="sub">Type</div><div>${esc(containerRecordType(record))}</div></div>
-          <div><div class="sub">Vendors</div><div>${formatNumber(vendors.length)}${vendors.length ? `<div class="sub">${esc(vendors.join(', '))}</div>` : ''}</div></div>
-          <div><div class="sub">POs</div><div>${formatNumber(pos.length)}${pos.length ? `<div class="sub">${esc(pos.map((po) => po.po).join(', '))}</div>` : ''}</div></div>
-          <div><div class="sub">Port</div><div>${esc(details.port || '—')}</div></div>
-          <div><div class="sub">Sailing date</div><div>${sailing ? formatDate(sailing) : '—'}</div></div>
-          <div><div class="sub">ETA</div><div>${details.eta ? `${formatDate(details.eta)} <span class="sub">${esc(relativeEta(details.eta))}</span>` : '—'}</div></div>
-          <div><div class="sub">Warehouse</div><div>${esc(details.warehouse || '—')}</div></div>
+          <div><div class="field-label">Container type</div><div>${esc(containerRecordType(record))}</div></div>
+          <div><div class="field-label">Vendors</div><div title="${attr(vendors.join(', '))}">${compactTextList(vendors)}</div></div>
+          <div><div class="field-label">POs inside</div><div>${renderContainerPos(pos)}</div></div>
+          <div><div class="field-label">Port</div><div>${esc(details.port || '—')}</div></div>
+          <div><div class="field-label">Sailing date</div><div>${sailing ? formatDate(sailing) : '—'}</div></div>
+          <div><div class="field-label">ETA</div><div>${details.eta ? formatDate(details.eta) : '—'}</div></div>
+          <div><div class="field-label">Warehouse</div><div>${esc(details.warehouse || '—')}</div></div>
         </div>
 
         ${renderContainerStepper(record)}
       </div>`;
+  }
+
+  function containerActivityEvents(record) {
+    const events = containerActivityFor(record.key).map((event) => Object.assign({}, event));
+    const hasArrivedEvent = events.some((event) => event.type === 'arrived');
+
+    if (!hasArrivedEvent) {
+      if (record.kind === 'planner' && record.container.arrivedDate) {
+        const details = vendorDetailsFor(record);
+        events.push({
+          at: record.container.arrivedDate,
+          type: 'arrived',
+          title: 'Container arrived',
+          remark: [details.warehouse, record.container.port].filter(Boolean).join(' · '),
+        });
+      } else if (record.kind === 'real') {
+        record.group.receipts.forEach((receipt) => {
+          const receivedDate = receiptReceivedDate(receipt);
+          if (!receivedDate) return;
+          const warehouse = renderWarehouse(receipt).label;
+          events.push({
+            at: receivedDate,
+            type: 'arrived',
+            title: 'Vendor shipment received',
+            remark: [
+              receipt.invoiceNo ? `Invoice ${receipt.invoiceNo}` : '',
+              receipt.vendorId || '',
+              warehouse === '—' ? '' : warehouse,
+            ].filter(Boolean).join(' · '),
+          });
+        });
+      }
+    }
+
+    return events
+      .filter((event) => event && event.at)
+      .sort((a, b) => {
+        const aTime = Date.parse(a.at);
+        const bTime = Date.parse(b.at);
+        return (Number.isNaN(bTime) ? 0 : bTime) - (Number.isNaN(aTime) ? 0 : aTime);
+      });
+  }
+
+  function renderContainerActivity(record) {
+    const events = containerActivityEvents(record);
+    return `
+      <section class="container-detail-section container-activity-section">
+        <div class="row">
+          <div>
+            <h3>Activity</h3>
+            <div class="sub">Latest first</div>
+          </div>
+        </div>
+        ${events.length ? `
+          <ol class="container-activity">
+            ${events.map((event) => `
+              <li class="activity-event">
+                <div class="activity-head">
+                  <b>${esc(event.title || 'Update')}</b>
+                  <time class="sub" datetime="${attr(event.at)}">${formatDateTime(event.at)}</time>
+                </div>
+                ${event.remark ? `<div class="sub activity-remark">${esc(event.remark)}</div>` : ''}
+              </li>`).join('')}
+          </ol>` : `
+          <div class="activity-empty sub">No activity recorded for this container yet. Status changes and ETA edits will appear here.</div>`}
+      </section>`;
   }
 
   function plannerAssignmentSummary(container) {
@@ -2430,10 +2608,6 @@
     return Boolean(update.po && record.group.receipts.some((receipt) => receipt.matchPo === update.po));
   }
 
-  function legacyUpdatesForRecord(record) {
-    return state.vendorUpdates.filter((update) => containerRecordMatchesLegacyUpdate(record, update));
-  }
-
   function migrateLegacyVendorUpdates() {
     const records = [
       ...state.plannerContainers.map((container) => ({ kind: 'planner', key: container.id, container })),
@@ -2471,42 +2645,41 @@
       const input = form.querySelector(`[data-vd="${field}"]`);
       return input ? String(input.value || '').trim() : '';
     };
-    const number = (field) => {
-      const raw = value(field);
-      if (!raw) return null;
-      const parsed = Number(raw);
-      return Number.isFinite(parsed) ? parsed : null;
-    };
 
-    const details = {
-      tracking: value('tracking'),
+    const previousDetails = vendorDetailsFor(record);
+    const details = Object.assign({}, previousDetails, {
       invoice: value('invoice'),
       vessel: value('vessel'),
       etd: value('etd'),
       eta: value('eta'),
       port: value('port'),
       warehouse: value('warehouse'),
-      cartons: number('cartons'),
-      grossWeight: number('grossWeight'),
-      cbm: number('cbm'),
-      status: value('status'),
-      source: value('source'),
-      contact: value('contact'),
       notes: value('notes'),
-      updatedAt: todayIso(),
-    };
+      updatedAt: nowTimestamp(),
+    });
+    const previousEta = previousDetails.eta || '';
+    const nextEta = details.eta || '';
 
     state.vendorDetails[key] = details;
 
     if (record.kind === 'planner') {
-      record.container.etaDate = details.eta || record.container.etaDate || '';
-      record.container.port = details.port || record.container.port || '';
-      if (details.etd) record.container.sailingDate = details.etd;
+      record.container.etaDate = nextEta;
+      record.container.port = details.port || '';
+      record.container.sailingDate = details.etd || '';
+    }
+
+    if (previousEta !== nextEta) {
+      addContainerActivity(
+        key,
+        'eta-changed',
+        'ETA changed',
+        `${previousEta ? formatDate(previousEta) : 'Not set'} → ${nextEta ? formatDate(nextEta) : 'Not set'}`
+      );
     }
 
     persistDemoState();
     render();
-    showToast(`Vendor details saved for ${containerRecordLabel(record)}.`);
+    showToast(`Shipment details saved for ${containerRecordLabel(record)}.`);
   }
 
   function renderContainerVendorDetails(record) {
@@ -2514,57 +2687,31 @@
     const portOptions = Array.from(new Set([details.port, ...(DATA.ports || [])].filter(Boolean)))
       .map((port) => `<option value="${attr(port)}"${details.port === port ? ' selected' : ''}>${esc(port)}</option>`)
       .join('');
-    const statusOptions = VENDOR_UPDATE_STATUSES
-      .map((status) => `<option value="${attr(status)}"${details.status === status ? ' selected' : ''}>${esc(status)}</option>`)
-      .join('');
-    const sourceOptions = VENDOR_UPDATE_SOURCES
-      .map((source) => `<option value="${attr(source)}"${details.source === source ? ' selected' : ''}>${esc(source)}</option>`)
-      .join('');
-    const legacy = legacyUpdatesForRecord(record);
 
     return `
       <section class="container-detail-section">
         <div class="row">
           <div>
-            <h3>Vendor details</h3>
-            <div class="sub">Moved from Vendor updates. Saved in this browser for this container.</div>
+            <h3>Shipment details</h3>
+            <div class="sub">Changes are saved in this browser only.</div>
           </div>
-          <span class="tag">${formatNumber(legacy.length)} old update${legacy.length === 1 ? '' : 's'}</span>
         </div>
 
         <form id="container-vendor-form" class="container-form" data-container-key="${attr(record.key)}">
           <div class="container-form-grid">
-            <label class="cf"><span>Tracking / container</span><input data-vd="tracking" type="text" value="${attr(details.tracking || '')}" placeholder="Container or booking ref"></label>
             <label class="cf"><span>Invoice / booking no.</span><input data-vd="invoice" type="text" value="${attr(details.invoice || '')}" placeholder="Vendor invoice or booking no."></label>
             <label class="cf"><span>Vessel / carrier</span><input data-vd="vessel" type="text" value="${attr(details.vessel || '')}" placeholder="Vessel or carrier"></label>
             <label class="cf"><span>Port</span><select data-vd="port"><option value="">Select port…</option>${portOptions}</select></label>
-            <label class="cf"><span>ETD</span><input data-vd="etd" type="date" value="${attr(details.etd || '')}"></label>
+            <label class="cf"><span>Sailing date (ETD)</span><input data-vd="etd" type="date" value="${attr(details.etd || '')}"></label>
             <label class="cf"><span>ETA</span><input data-vd="eta" type="date" value="${attr(details.eta || '')}"></label>
             <label class="cf"><span>Warehouse</span><input data-vd="warehouse" type="text" value="${attr(details.warehouse || '')}" placeholder="Destination warehouse"></label>
-            <label class="cf"><span>Cartons</span><input data-vd="cartons" type="number" min="0" step="1" value="${details.cartons == null ? '' : attr(details.cartons)}" placeholder="0"></label>
-            <label class="cf"><span>Gross weight (kg)</span><input data-vd="grossWeight" type="number" min="0" step="0.01" value="${details.grossWeight == null ? '' : attr(details.grossWeight)}" placeholder="0"></label>
-            <label class="cf"><span>CBM</span><input data-vd="cbm" type="number" min="0" step="0.01" value="${details.cbm == null ? '' : attr(details.cbm)}" placeholder="0"></label>
-            <label class="cf"><span>Status</span><select data-vd="status"><option value="">Select status…</option>${statusOptions}</select></label>
-            <label class="cf"><span>Source</span><select data-vd="source"><option value="">Select source…</option>${sourceOptions}</select></label>
-            <label class="cf"><span>Received from</span><input data-vd="contact" type="text" value="${attr(details.contact || '')}" placeholder="Vendor contact name"></label>
           </div>
-          <label class="cf"><span>Other details / notes</span><textarea data-vd="notes" rows="3" placeholder="Packaging, documents, delays, partial shipment, other POs in the same container…">${esc(details.notes || '')}</textarea></label>
+          <label class="cf"><span>Notes</span><textarea data-vd="notes" rows="3" placeholder="Delays, partial shipment, documents, other POs in the same container…">${esc(details.notes || '')}</textarea></label>
           <div class="row">
-            <span class="sub">Browser-local · ${details.updatedAt ? `saved ${formatDate(details.updatedAt)}` : 'not edited yet'}</span>
-            <button class="p" type="submit">Save vendor details</button>
+            <span class="sub">${details.updatedAt ? `Last saved ${formatDateTime(details.updatedAt)}` : 'Not edited yet'}</span>
+            <button class="p" type="submit">Save details</button>
           </div>
         </form>
-
-        ${legacy.length ? `
-          <div class="legacy-updates">
-            <div class="sub">Carried over from the old Vendor updates store</div>
-            ${legacy.map((update) => `
-              <div class="legacy-update-row">
-                <b>${esc(update.status || 'Update')}</b>
-                <span class="sub">${esc(update.tracking || update.po || '—')} · ${esc(update.loggedAt ? formatDate(update.loggedAt) : '—')}</span>
-                ${update.notes ? `<div>${esc(update.notes)}</div>` : ''}
-              </div>`).join('')}
-          </div>` : ''}
       </section>`;
   }
 
@@ -2608,11 +2755,15 @@
           <button class="s" data-action="close-container">← Back to containers</button>
         </div>
         <div id="container-detail-title">${renderContainerDetailHeader(record)}</div>
-        ${record.kind === 'planner'
-          ? renderPlannerContainerContents(record.container)
-          : renderRealContainerContents(record.group)}
-        ${renderContainerVendorDetails(record)}
-        ${renderContainerDocuments(record)}
+        ${renderContainerActivity(record)}
+        <details class="container-detail-more">
+          <summary>Shipment details, contents and documents</summary>
+          ${renderContainerVendorDetails(record)}
+          ${record.kind === 'planner'
+            ? renderPlannerContainerContents(record.container)
+            : renderRealContainerContents(record.group)}
+          ${renderContainerDocuments(record)}
+        </details>
       </section>`;
   }
 
@@ -3081,6 +3232,12 @@
     }
     if (!container.sailingDate) container.sailingDate = AS_OF;
     container.status = 'shipped';
+    addContainerActivity(
+      container.id,
+      'shipped',
+      'Shipment marked as shipped',
+      `${formatNumber(containerUnits(container))} units · shipped as planned`
+    );
     state.shippingLineEdit = '';
     syncPlannerAssigned();
     clearSummaryCache();
@@ -3156,6 +3313,15 @@
       state.simulatedReceipts[receipt.id] = { receivedDate: AS_OF, quantities: {} };
       marked += 1;
     });
+    addContainerActivity(
+      group.key,
+      'arrived',
+      'Container arrived',
+      [
+        `${formatNumber(marked)} vendor shipment${marked === 1 ? '' : 's'} marked received`,
+        containerRecordWarehouse({ kind: 'real', group }),
+      ].filter(Boolean).join(' · ')
+    );
     clearSummaryCache();
     persistDemoState();
     render();
@@ -3206,6 +3372,7 @@
     state.poConfirmations = {};
     state.vendorDetails = {};
     state.containerDocuments = {};
+    state.containerActivity = {};
     state.shippingLineEdit = '';
     state.expandedContainerGroups = new Set();
     state.containersPage = 1;
