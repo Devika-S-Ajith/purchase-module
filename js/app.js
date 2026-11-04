@@ -5,7 +5,7 @@
  * scripts/build_data.py into js/data.js.
  *
  * Nothing in the planning screens is persisted; containers created in the
- * Planner (concept) page live only for the current browser session.
+ * Planner page live only for the current browser session.
  */
 (function () {
   'use strict';
@@ -46,6 +46,28 @@
     'Partly received',
     'Not shipped yet',
   ];
+
+  const VENDOR_UPDATE_STATUSES = [
+    'In production',
+    'Ready to ship',
+    'Booked',
+    'Sailing',
+    'Delayed',
+    'Arrived',
+    'Documents pending',
+    'Other',
+  ];
+
+  const VENDOR_UPDATE_SOURCES = [
+    'Email',
+    'WhatsApp',
+    'Phone',
+    'Vendor portal',
+    'Other',
+  ];
+
+  const VENDOR_UPDATE_STORAGE_KEY = 'ariel.vendorUpdates.v1';
+  const ORDER_LINE_PAGE_SIZE = 25;
 
   const RECEIPT_STATUSES = [
     'Received',
@@ -227,6 +249,11 @@
     });
   }
 
+  function todayIso() {
+    const now = new Date();
+    return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  }
+
   function relativeEta(value) {
     if (!value) return '';
     const days = diffDays(AS_OF, value);
@@ -280,14 +307,16 @@
   const state = {
     vendorFilter: '',
     buyerFilter: '',
-    segmentFilter: 'import',
+    segmentFilter: 'all',
 
     searchQuery: '',
     statusFilter: '',
+    orderBucketFilter: '',
     sortBy: 'eta',
     sortDir: 'asc',
     orderPage: 1,
     orderPageSize: 50,
+    orderLinePages: {},
     includeHeaderOnly: false,
     portFilter: '',
     expandedOrders: new Set(),
@@ -305,16 +334,53 @@
     importPreviews: {},
     reminders: [],
 
+    vendorUpdates: [],
+    vendorUpdateSequence: 0,
+    vendorUpdatePo: '',
+    vendorUpdateQuery: '',
+    vendorUpdateStatus: '',
+
     plannerContainers: [],
     plannerContainerSequence: 0,
     plannerSelectedLineId: null,
     plannerAssigned: {},
+    plannerLineQuery: '',
+    plannerPendingAssignment: null,
 
     simulatedReceipts: {},
     simulatedLineQty: {},
   };
 
   let summaryCache = new Map();
+
+  function loadVendorUpdates() {
+    try {
+      const raw = window.localStorage.getItem(VENDOR_UPDATE_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((row) => row && typeof row === 'object')
+        .map((row, index) => Object.assign({}, row, { id: row.id || `vu-loaded-${index}` }));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function persistVendorUpdates() {
+    try {
+      window.localStorage.setItem(VENDOR_UPDATE_STORAGE_KEY, JSON.stringify(state.vendorUpdates));
+    } catch (error) {
+      /* The prototype still works in memory when storage is unavailable. */
+    }
+  }
+
+  function vendorUpdateStatusVariant(status) {
+    if (status === 'Arrived') return 'ok';
+    if (status === 'Delayed') return 'bad';
+    if (status === 'Sailing') return 'info';
+    if (status === 'Booked' || status === 'Ready to ship' || status === 'Documents pending') return 'wn';
+    return '';
+  }
 
   function clearSummaryCache() {
     summaryCache = new Map();
@@ -425,6 +491,14 @@
       && !poHasOpenReceipt(po)
       && unplannedUnitsForPo(po) > 0
       && (summary.ageDays > 90 || summary.receivedReceipts.length > 0);
+  }
+
+  function orderCoverageBucket(po, summary) {
+    if (summary.balance <= 0) return 'Received';
+    if (poIsAtRisk(po, summary)) return 'At risk';
+    if (poHasOpenReceipt(po) || shippedUnitsForPo(po) > 0 || summary.status === 'In transit') return 'In transit';
+    if (plannedUnitsForPo(po) > 0) return 'Planned';
+    return 'Not yet planned';
   }
 
   function lineStatus(line) {
@@ -569,6 +643,7 @@
     const includeHeaderOnly = options.includeHeaderOnly ?? state.includeHeaderOnly;
     const query = String(options.query ?? state.searchQuery ?? '').trim().toLowerCase();
     const status = options.status ?? state.statusFilter;
+    const bucket = options.bucket ?? state.orderBucketFilter;
     const port = options.port ?? state.portFilter;
 
     const rows = [];
@@ -582,6 +657,8 @@
       const summary = getPoSummary(po);
       if (status === 'All open' && summary.balance <= 0) return;
       if (status && status !== 'All open' && summary.status !== status) return;
+      if (bucket === 'Open POs' && summary.balance <= 0) return;
+      if (bucket && bucket !== 'Open POs' && orderCoverageBucket(po, summary) !== bucket) return;
       rows.push({ po, summary });
     });
 
@@ -637,7 +714,7 @@
       <div class="row">
         <div>
           <h1>${esc(title)}</h1>
-          <div class="sub">${subtitle}</div>
+          ${subtitle ? `<div class="sub">${subtitle}</div>` : ''}
         </div>
         ${extra}
       </div>`;
@@ -720,6 +797,38 @@
       <span class="sub">· ${esc(type)} · ${formatNumber(summary.receiptCount)} shipment${summary.receiptCount === 1 ? '' : 's'}</span>`;
   }
 
+  function vendorStats(rows) {
+    const vendorMap = new Map();
+
+    rows.forEach(({ po, summary }) => {
+      const key = po.vendorId || '(blank)';
+      const vendor = vendorMap.get(key) || {
+        vendor: key,
+        poCount: 0,
+        openPos: 0,
+        openValue: 0,
+        receivedPos: 0,
+        needsAction: 0,
+        nextEta: '',
+      };
+      const atRisk = poIsAtRisk(po, summary);
+      const received = summary.balance <= 0;
+
+      vendor.poCount += 1;
+      if (summary.balance > 0) vendor.openPos += 1;
+      vendor.openValue += summary.openValue;
+      if (received) vendor.receivedPos += 1;
+      if (atRisk || summary.status === 'Overdue' || summary.status === 'Unshipped balance') {
+        vendor.needsAction += 1;
+      }
+      if (summary.nextEta && (!vendor.nextEta || summary.nextEta < vendor.nextEta)) vendor.nextEta = summary.nextEta;
+      vendorMap.set(key, vendor);
+    });
+
+    return Array.from(vendorMap.values())
+      .sort((a, b) => b.openValue - a.openValue || a.vendor.localeCompare(b.vendor));
+  }
+
   /* =========================================================================
      6. Dashboard
      ========================================================================= */
@@ -730,124 +839,56 @@
     const totals = {
       openPos: 0,
       openValue: 0,
-      inTransit: 0,
       arriving14: 0,
       atRiskPos: 0,
-      pastEtaPos: 0,
-      unshippedPos: 0,
-      orderedUnits: 0,
-      receivedUnits: 0,
-      inTransitUnits: 0,
-      plannedUnits: 0,
-      notYetPlannedUnits: 0,
-      atRiskUnits: 0,
+      receivedPos: 0,
+      inTransitPos: 0,
+      plannedPos: 0,
+      notYetPlannedPos: 0,
     };
-    const needsAction = [];
-    const upcoming = [];
 
     rows.forEach(({ po, summary }) => {
-      const hasOpenReceipt = poHasOpenReceipt(po);
-      const atRisk = poIsAtRisk(po, summary);
+      const bucket = orderCoverageBucket(po, summary);
+
       if (summary.balance > 0) {
         totals.openPos += 1;
         totals.openValue += summary.openValue;
       }
-      if (summary.openReceipts.some((receipt) => receipt.etaDate && receipt.etaDate >= AS_OF)) {
-        totals.inTransit += 1;
-      }
-      if (summary.nextEta && summary.nextEta >= AS_OF && summary.nextEta <= end14) {
+      if (bucket !== 'Received' && summary.nextEta && summary.nextEta >= AS_OF && summary.nextEta <= end14) {
         totals.arriving14 += 1;
       }
-      if (atRisk) totals.atRiskPos += 1;
-      if (summary.status === 'Overdue') totals.pastEtaPos += 1;
-      if (summary.status === 'Unshipped balance') totals.unshippedPos += 1;
 
-      let actionReason = '';
-      let priority = 0;
-      if (atRisk) {
-        actionReason = 'At risk';
-      } else if (summary.status === 'Overdue') {
-        actionReason = 'Past ETA';
-        priority = 1;
-      } else if (summary.status === 'Unshipped balance') {
-        actionReason = 'Unshipped balance';
-        priority = 2;
+      /* Each PO is counted once in the order-coverage split. */
+      if (bucket === 'Received') {
+        totals.receivedPos += 1;
+      } else if (bucket === 'At risk') {
+        totals.atRiskPos += 1;
+      } else if (bucket === 'In transit') {
+        totals.inTransitPos += 1;
+      } else if (bucket === 'Planned') {
+        totals.plannedPos += 1;
+      } else {
+        totals.notYetPlannedPos += 1;
       }
-      if (actionReason) needsAction.push({ po, summary, reason: actionReason, priority });
-
-      po.receipts.forEach((receipt) => {
-        if (receipt.invalid || isReceiptReceived(receipt) || !receipt.etaDate) return;
-        upcoming.push({ receipt, po });
-      });
-
-      po.lines.forEach((line) => {
-        if (line.isCheckData) return;
-        const open = openUnitsForLine(line);
-        totals.orderedUnits += line.ordered;
-        totals.receivedUnits += receivedUnitsForLine(line);
-        if (open <= 0) return;
-        if (hasOpenReceipt) {
-          totals.inTransitUnits += open;
-          return;
-        }
-        const shipped = Math.min(shippedUnitsForLine(line), open);
-        const planned = Math.min(plannedUnitsForLine(line), Math.max(0, open - shipped));
-        const remainingUnplanned = Math.max(0, open - shipped - planned);
-        const riskUnits = atRisk ? remainingUnplanned : 0;
-        totals.inTransitUnits += shipped;
-        totals.plannedUnits += planned;
-        totals.atRiskUnits += riskUnits;
-        totals.notYetPlannedUnits += remainingUnplanned - riskUnits;
-      });
     });
 
-    needsAction.sort((a, b) =>
-      a.priority - b.priority
-      || (b.summary.ageDays ?? -1) - (a.summary.ageDays ?? -1)
-      || a.po.po.localeCompare(b.po.po)
-    );
-    upcoming.sort((a, b) => a.receipt.etaDate.localeCompare(b.receipt.etaDate));
-    const nextEtaRows = upcoming.slice(0, 5);
-    const topActionRows = needsAction.slice(0, 5);
+    const vendors = vendorStats(rows);
+    const topVendors = vendors.slice(0, 8);
 
-    const vendorMap = new Map();
-    rows.forEach(({ po, summary }) => {
-      const key = po.vendorId || '(blank)';
-      const vendor = vendorMap.get(key) || {
-        vendor: key,
-        openValue: 0,
-        ordered: 0,
-        received: 0,
-        needsAction: 0,
-        nextEta: '',
-      };
-      vendor.openValue += summary.openValue;
-      vendor.ordered += summary.countedOrdered;
-      vendor.received += summary.received;
-      if (poIsAtRisk(po, summary) || summary.status === 'Overdue' || summary.status === 'Unshipped balance') {
-        vendor.needsAction += 1;
-      }
-      if (summary.nextEta && (!vendor.nextEta || summary.nextEta < vendor.nextEta)) vendor.nextEta = summary.nextEta;
-      vendorMap.set(key, vendor);
-    });
-    const vendors = Array.from(vendorMap.values())
-      .sort((a, b) => b.openValue - a.openValue || a.vendor.localeCompare(b.vendor))
-      .slice(0, 8);
-
-    const coverageTotal = totals.orderedUnits;
+    const coverageTotal = rows.length;
     const coveragePct = (value) => (coverageTotal ? (value / coverageTotal) * 100 : 0);
     const coverage = [
-      ['Received', totals.receivedUnits, '#5b8f4a'],
-      ['In transit', totals.inTransitUnits, '#3b82c4'],
-      ['Planned', totals.plannedUnits, '#e0a030'],
-      ['Not yet planned', totals.notYetPlannedUnits, '#aeb7c2'],
-      ['At risk', totals.atRiskUnits, '#e5534b'],
+      ['Received', totals.receivedPos, '#5b8f4a'],
+      ['In transit', totals.inTransitPos, '#3b82c4'],
+      ['Planned', totals.plannedPos, '#e0a030'],
+      ['Not yet planned', totals.notYetPlannedPos, '#aeb7c2'],
+      ['At risk', totals.atRiskPos, '#e5534b'],
     ];
-    const needsActionCount = new Set(needsAction.map((row) => row.po.po)).size;
-    const unplannedOpenUnits = totals.notYetPlannedUnits + totals.atRiskUnits;
-    const orderedPct = totals.orderedUnits ? Math.round((unplannedOpenUnits / totals.orderedUnits) * 100) : 0;
+    const notYetPlannedPct = totals.openPos
+      ? Math.round((totals.notYetPlannedPos / totals.openPos) * 100)
+      : 0;
     const openValueLabel = `$${(totals.openValue / 1e6).toFixed(2)}M open value`;
-    const coverageExplanation = 'Received is ordered minus current balance. In transit includes open receipts and shipped containers. Planned includes draft/booked containers. The remaining open units are split between Not yet planned and At risk; check-data lines are excluded.';
+    const coverageExplanation = 'Each PO is counted once. Received POs are fully received. In transit POs have an open receipt or shipped units. At risk POs have an unplanned balance with no open receipt and are over 90 days old or previously received. Planned POs have their remaining balance in draft/booked containers; all other open POs are not yet planned.';
 
     return `
       <div class="dashboard">
@@ -860,30 +901,30 @@
             <span class="sub">${esc(openValueLabel)}</span>
           </button>
           <button class="card kp" data-action="ship-on-way">
-            <b>${formatNumber(totals.inTransit)}</b>
+            <b>${formatNumber(totals.inTransitPos)}</b>
             <span class="sub">In transit</span>
             <span class="sub">${formatNumber(totals.arriving14)} arriving in 14 days</span>
           </button>
-          <button class="card kp${needsActionCount > 0 ? ' hot' : ''}" data-action="go:followup">
-            <b>${formatNumber(needsActionCount)}</b>
-            <span class="sub">Needs action</span>
-            <span class="sub">${formatNumber(totals.atRiskPos)} at risk · ${formatNumber(totals.pastEtaPos)} past ETA · ${formatNumber(totals.unshippedPos)} unshipped balance</span>
+          <button class="card kp${totals.atRiskPos > 0 ? ' hot' : ''}" data-action="go:followup">
+            <b>${formatNumber(totals.atRiskPos)}</b>
+            <span class="sub">At risk</span>
+            <span class="sub">No open receipt · unplanned balance</span>
           </button>
           <button class="card kp neutral" data-action="go:planner">
-            <b>${formatNumber(unplannedOpenUnits)}</b>
+            <b>${formatNumber(totals.notYetPlannedPos)}</b>
             <span class="sub">Not yet planned</span>
-            <span class="sub">${orderedPct}% of ordered units</span>
+            <span class="sub">${notYetPlannedPct}% of open POs</span>
           </button>
         </div>
 
         <section class="card coverage-card">
           <div class="row">
             <h2>Order coverage <span class="info-icon" tabindex="0" title="${attr(coverageExplanation)}" aria-label="Order coverage definition">i</span></h2>
-            <span class="sub"><b>${formatNumber(totals.orderedUnits)}</b> ordered units</span>
+            <span class="sub"><b>${formatNumber(coverageTotal)}</b> POs · <b>${formatNumber(totals.openPos)}</b> open</span>
           </div>
-          <div class="pipe" role="img" aria-label="Order coverage split across five segments">
+          <div class="pipe" role="img" aria-label="Order coverage split across five PO segments">
             ${coverage.map(([label, value, colour]) => value > 0
-              ? `<span style="width:${coveragePct(value)}%;background:${colour}" title="${attr(label)}: ${formatNumber(value)} units"></span>`
+              ? `<span style="width:${coveragePct(value)}%;background:${colour}" title="${attr(label)}: ${formatNumber(value)} POs"></span>`
               : '').join('')}
           </div>
           <div class="coverage-legend">
@@ -891,60 +932,6 @@
               <span><i style="background:${colour}"></i>${esc(label)} <b>${formatNumber(value)}</b> <span class="sub">${coveragePct(value).toFixed(1)}%</span></span>`).join('')}
           </div>
         </section>
-
-        <div class="two dashboard-columns">
-          <section class="card dashboard-list">
-            <div class="row section-head">
-              <h2>Needs action</h2>
-              <button class="s" data-action="go:followup">View all ${formatNumber(needsActionCount)}</button>
-            </div>
-            ${topActionRows.length ? `
-              <div class="sc">
-                <table class="dashboard-table">
-                  <thead><tr><th>PO / vendor</th><th>Reason</th><th class="n">Open value</th><th class="n">Age / late</th></tr></thead>
-                  <tbody>
-                    ${topActionRows.map(({ po, summary, reason }) => {
-                      const lateDays = reason === 'Past ETA' && summary.nextEta ? daysLate(summary.nextEta) : null;
-                      const age = summary.ageDays == null ? '—' : `${formatNumber(summary.ageDays)} days old`;
-                      const ageLabel = lateDays != null && lateDays > 0 ? `${formatNumber(lateDays)} days late` : age;
-                      const variant = reason === 'At risk' || reason === 'Past ETA' ? 'bad' : 'wn';
-                      return `<tr class="lk" data-action="openpo:${attr(po.po)}">
-                        <td><b>${esc(po.po)}</b><span class="sub">${esc(po.vendorId || '—')}</span></td>
-                        <td>${renderTag(variant, reason)}</td>
-                        <td class="n">$${formatValue(summary.openValue)}</td>
-                        <td class="n">${esc(ageLabel)}</td>
-                      </tr>`;
-                    }).join('')}
-                  </tbody>
-                </table>
-              </div>` : '<div class="empty-state">Nothing needs action</div>'}
-          </section>
-
-          <section class="card dashboard-list">
-            <div class="row section-head">
-              <h2>Upcoming ETAs</h2>
-              <button class="s" data-action="shipments-all">Open shipments</button>
-            </div>
-            ${nextEtaRows.length ? `
-              <div class="sc">
-                <table class="dashboard-table eta-table">
-                  <thead><tr><th>ETA</th><th>Tracking</th><th>PO / vendor</th><th>Type</th></tr></thead>
-                  <tbody>
-                    ${nextEtaRows.map(({ receipt, po }) => {
-                      const late = daysLate(receipt.etaDate);
-                      const etaText = late > 0 ? renderTag('bad', `${formatNumber(late)} days late`) : esc(relativeEta(receipt.etaDate));
-                      return `<tr class="lk" data-action="openpo:${attr(po.po)}">
-                        <td><b>${formatDate(receipt.etaDate)}</b><span class="sub">${etaText}</span></td>
-                        <td class="mono">${esc(receipt.tracking || '—')}</td>
-                        <td><b>${esc(po.po)}</b><span class="sub">${esc(po.vendorId || '—')}</span></td>
-                        <td>${esc(receipt.type || '—')}</td>
-                      </tr>`;
-                    }).join('')}
-                  </tbody>
-                </table>
-              </div>` : '<div class="empty-state">No open receipts with an ETA</div>'}
-          </section>
-        </div>
 
         <section class="card vendors-card">
           <div class="row section-head">
@@ -955,11 +942,11 @@
             <table class="dashboard-table vendors-table">
               <thead><tr><th>Vendor</th><th class="n">Open value</th><th class="n">Received %</th><th class="n">Needs action</th><th>Next ETA</th></tr></thead>
               <tbody>
-                ${vendors.map((vendor) => `
+                ${topVendors.map((vendor) => `
                   <tr>
                     <td><b>${esc(vendor.vendor)}</b></td>
                     <td class="n">$${formatValue(vendor.openValue)}</td>
-                    <td class="n">${vendor.ordered ? `${Math.round((vendor.received / vendor.ordered) * 100)}%` : '—'}</td>
+                    <td class="n">${vendor.poCount ? `${Math.round((vendor.receivedPos / vendor.poCount) * 100)}%` : '—'}</td>
                     <td class="n">${formatNumber(vendor.needsAction)}</td>
                     <td>${vendor.nextEta ? `<b>${formatDate(vendor.nextEta)}</b><span class="sub">${esc(relativeEta(vendor.nextEta))}</span>` : '—'}</td>
                   </tr>`).join('')}
@@ -968,6 +955,395 @@
           </div>
         </section>
       </div>`;
+  }
+
+  function renderVendors() {
+    const rows = filteredOrders({ includeHeaderOnly: false, status: '', port: '', query: '' });
+    const vendors = vendorStats(rows);
+    const openValue = vendors.reduce((sum, vendor) => sum + vendor.openValue, 0);
+
+    return `
+      ${renderHeader(
+        'Vendors',
+        `All vendors in the current filters. Received % is the share of POs fully received. Data as of ${AS_OF_LABEL}.`,
+        `<div class="sub">${formatNumber(vendors.length)} vendors · $${formatValue(openValue)} open value</div>`
+      )}
+
+      <section class="card vendors-card">
+        <div class="row section-head">
+          <h2>All vendors</h2>
+          <span class="sub">Select a vendor to open its purchase orders</span>
+        </div>
+        <div class="sc">
+          <table class="dashboard-table vendors-table">
+            <thead>
+              <tr>
+                <th>Vendor</th>
+                <th class="n">POs</th>
+                <th class="n">Open POs</th>
+                <th class="n">Open value</th>
+                <th class="n">Received %</th>
+                <th class="n">Needs action</th>
+                <th>Next ETA</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${vendors.map((vendor) => `
+                <tr${vendor.vendor === '(blank)' ? '' : ` class="lk" data-action="vendor-orders:${attr(vendor.vendor)}"`}>
+                  <td><b>${esc(vendor.vendor)}</b></td>
+                  <td class="n">${formatNumber(vendor.poCount)}</td>
+                  <td class="n">${formatNumber(vendor.openPos)}</td>
+                  <td class="n">$${formatValue(vendor.openValue)}</td>
+                  <td class="n">${vendor.poCount ? `${Math.round((vendor.receivedPos / vendor.poCount) * 100)}%` : '—'}</td>
+                  <td class="n">${formatNumber(vendor.needsAction)}</td>
+                  <td>${vendor.nextEta ? `<b>${formatDate(vendor.nextEta)}</b><span class="sub">${esc(relativeEta(vendor.nextEta))}</span>` : '—'}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+  }
+
+  /* =========================================================================
+     Vendor updates
+     ========================================================================= */
+
+  function vendorUpdatePoOptions() {
+    return Array.from(poById.values())
+      .filter((po) => po.lines.length)
+      .sort((a, b) => a.po.localeCompare(b.po))
+      .map((po) => {
+        const selected = state.vendorUpdatePo === po.po ? ' selected' : '';
+        return `<option value="${attr(po.po)}"${selected}>${esc(po.po)} · ${esc(po.vendorId || 'No vendor')}</option>`;
+      })
+      .join('');
+  }
+
+  function vendorUpdatePoMeta(po) {
+    if (!po) return 'Select a PO to see its vendor, buyer and line count.';
+    return `Vendor <b>${esc(po.vendorId || '—')}</b> · Buyer <b>${esc(po.buyer || '—')}</b> · ${formatNumber(po.lines.length)} line${po.lines.length === 1 ? '' : 's'}`;
+  }
+
+  function filteredVendorUpdates() {
+    const query = state.vendorUpdateQuery.trim().toLowerCase();
+    return state.vendorUpdates.filter((update) => {
+      if (state.vendorUpdateStatus && update.status !== state.vendorUpdateStatus) return false;
+      if (!query) return true;
+      return [
+        update.po,
+        update.vendor,
+        update.buyer,
+        update.tracking,
+        update.invoice,
+        update.vessel,
+        update.port,
+        update.warehouse,
+        update.status,
+        update.source,
+        update.contact,
+        update.notes,
+      ].join(' ').toLowerCase().includes(query);
+    });
+  }
+
+  function renderVendorUpdateList(updates) {
+    if (!updates.length) {
+      return `<div class="empty-state">${state.vendorUpdates.length ? 'No vendor updates match the current search.' : 'No vendor updates logged yet.'}</div>`;
+    }
+
+    return `
+      <div class="sc">
+        <table class="compact-table vendor-updates-table">
+          <thead>
+            <tr>
+              <th>PO / VENDOR</th>
+              <th>SHIPMENT</th>
+              <th>STATUS</th>
+              <th>DATES</th>
+              <th>VENDOR INPUT</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${updates.map((update) => {
+              const measurements = [
+                update.cartons != null ? `${formatNumber(update.cartons)} cartons` : '',
+                update.grossWeight != null ? `${Number(update.grossWeight).toLocaleString('en-US', { maximumFractionDigits: 2 })} kg` : '',
+                update.cbm != null ? formatCbm(update.cbm) : '',
+              ].filter(Boolean);
+              const place = [update.port, update.warehouse].filter(Boolean).join(' · ');
+              return `
+                <tr>
+                  <td>
+                    <a href="#orders" data-action="openpo:${attr(update.po)}"><b>${esc(update.po)}</b></a>
+                    <span class="sub">${esc(update.vendor || '—')}${update.buyer ? ` · ${esc(update.buyer)}` : ''}</span>
+                    <span class="sub">Logged ${update.loggedAt ? formatDate(update.loggedAt) : '—'}${update.loggedTime ? ` · ${esc(update.loggedTime)}` : ''}</span>
+                  </td>
+                  <td>
+                    <span class="mono">${esc(update.tracking || '—')}</span>
+                    <span class="sub">${update.invoice ? `Invoice ${esc(update.invoice)}` : 'No invoice'}${update.vessel ? ` · ${esc(update.vessel)}` : ''}</span>
+                    <span class="sub">${place ? esc(place) : 'No port / warehouse'}</span>
+                  </td>
+                  <td>
+                    ${update.status ? renderTag(vendorUpdateStatusVariant(update.status), update.status) : '<span class="sub">—</span>'}
+                    <span class="sub">${esc(update.source || '—')}</span>
+                  </td>
+                  <td>
+                    <span class="sub">ETD ${update.etd ? formatDate(update.etd) : '—'}</span>
+                    <span class="sub">ETA ${update.eta ? formatDate(update.eta) : '—'}</span>
+                    ${update.eta ? `<span class="sub">${esc(relativeEta(update.eta))}</span>` : ''}
+                  </td>
+                  <td>
+                    ${update.contact ? `<b>${esc(update.contact)}</b>` : '<span class="sub">No contact</span>'}
+                    ${update.notes ? `<div class="vendor-update-notes">${esc(update.notes)}</div>` : ''}
+                    ${measurements.length ? `<span class="sub">${esc(measurements.join(' · '))}</span>` : ''}
+                  </td>
+                  <td>
+                    <button class="s" data-action="delete-vendor-update:${attr(update.id)}" title="Remove this vendor update">Delete</button>
+                  </td>
+                </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  function renderVendorUpdates() {
+    const updates = filteredVendorUpdates();
+    const po = poById.get(state.vendorUpdatePo);
+    const portOptions = (DATA.ports || [])
+      .map((port) => `<option value="${attr(port)}">${esc(port)}</option>`)
+      .join('');
+    const statusOptions = VENDOR_UPDATE_STATUSES
+      .map((status) => `<option value="${attr(status)}">${esc(status)}</option>`)
+      .join('');
+    const sourceOptions = VENDOR_UPDATE_SOURCES
+      .map((source) => `<option value="${attr(source)}"${source === 'Email' ? ' selected' : ''}>${esc(source)}</option>`)
+      .join('');
+    const statusFilterOptions = VENDOR_UPDATE_STATUSES
+      .map((status) => `<option value="${attr(status)}"${state.vendorUpdateStatus === status ? ' selected' : ''}>${esc(status)}</option>`)
+      .join('');
+
+    return `
+      ${renderHeader(
+        'Vendor updates',
+        `Capture shipment and other details supplied by vendors. The “+ Log vendor update” button is available from every page.`,
+        `<div class="sub">${formatNumber(state.vendorUpdates.length)} saved · browser-local</div>`
+      )}
+
+      <div class="vendor-update-layout">
+        <section class="card">
+          <div class="row section-head">
+            <h2>Log vendor input</h2>
+            <span class="sub">Fields marked * are required</span>
+          </div>
+
+          <form id="vendor-update-form" class="vendor-update-form">
+            <label class="vf">
+              <span>PO *</span>
+              <select id="vendor-update-po">
+                <option value="">Select a PO…</option>
+                ${vendorUpdatePoOptions()}
+              </select>
+            </label>
+            <div class="vendor-update-meta" id="vendor-update-po-meta">${vendorUpdatePoMeta(po)}</div>
+
+            <div class="vf-grid">
+              <label class="vf">
+                <span>Shipment / tracking</span>
+                <input id="vendor-update-tracking" type="text" placeholder="Container, tracking or booking ref">
+              </label>
+              <label class="vf">
+                <span>Invoice / booking no.</span>
+                <input id="vendor-update-invoice" type="text" placeholder="Vendor invoice or booking no.">
+              </label>
+              <label class="vf">
+                <span>Vessel / carrier</span>
+                <input id="vendor-update-vessel" type="text" placeholder="Vessel or carrier">
+              </label>
+              <label class="vf">
+                <span>Port</span>
+                <select id="vendor-update-port">
+                  <option value="">Select port…</option>
+                  ${portOptions}
+                </select>
+              </label>
+              <label class="vf">
+                <span>ETD</span>
+                <input id="vendor-update-etd" type="date">
+              </label>
+              <label class="vf">
+                <span>ETA</span>
+                <input id="vendor-update-eta" type="date">
+              </label>
+              <label class="vf">
+                <span>Warehouse</span>
+                <input id="vendor-update-warehouse" type="text" placeholder="Destination warehouse">
+              </label>
+              <label class="vf">
+                <span>Cartons</span>
+                <input id="vendor-update-cartons" type="number" min="0" step="1" placeholder="0">
+              </label>
+              <label class="vf">
+                <span>Gross weight (kg)</span>
+                <input id="vendor-update-weight" type="number" min="0" step="0.01" placeholder="0">
+              </label>
+              <label class="vf">
+                <span>CBM</span>
+                <input id="vendor-update-cbm" type="number" min="0" step="0.01" placeholder="0">
+              </label>
+              <label class="vf">
+                <span>Status</span>
+                <select id="vendor-update-status">
+                  <option value="">Select status…</option>
+                  ${statusOptions}
+                </select>
+              </label>
+              <label class="vf">
+                <span>Source</span>
+                <select id="vendor-update-source">${sourceOptions}</select>
+              </label>
+              <label class="vf">
+                <span>Received from</span>
+                <input id="vendor-update-contact" type="text" placeholder="Vendor contact name">
+              </label>
+            </div>
+
+            <label class="vf">
+              <span>Other details / notes</span>
+              <textarea id="vendor-update-notes" rows="3" placeholder="Packaging, documents, delays, partial shipment, other POs in the same container…"></textarea>
+            </label>
+
+            <div class="row" style="justify-content:flex-start">
+              <button class="p" type="button" data-action="save-vendor-update">Save vendor update</button>
+              <button class="s" type="button" data-action="clear-vendor-update-form">Clear</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="row section-head">
+            <h2>Captured updates</h2>
+            <span class="sub" id="vendor-update-count">${formatNumber(updates.length)} shown</span>
+          </div>
+          <div class="row" style="justify-content:flex-start; margin-bottom:8px">
+            <input
+              type="search"
+              id="vendor-update-search"
+              placeholder="Search PO, vendor, tracking or notes"
+              value="${attr(state.vendorUpdateQuery)}"
+            >
+            <select id="vendor-update-status-filter">
+              <option value="">All statuses</option>
+              ${statusFilterOptions}
+            </select>
+          </div>
+          <div id="vendor-update-list">${renderVendorUpdateList(updates)}</div>
+        </section>
+      </div>`;
+  }
+
+  function updateVendorUpdateList() {
+    const host = document.getElementById('vendor-update-list');
+    if (!host) return;
+    const updates = filteredVendorUpdates();
+    host.innerHTML = renderVendorUpdateList(updates);
+    const count = document.getElementById('vendor-update-count');
+    if (count) count.textContent = `${formatNumber(updates.length)} shown`;
+  }
+
+  function updateVendorUpdatePoMeta() {
+    const select = document.getElementById('vendor-update-po');
+    const host = document.getElementById('vendor-update-po-meta');
+    if (!select || !host) return;
+    host.innerHTML = vendorUpdatePoMeta(poById.get(select.value));
+  }
+
+  function readVendorUpdateValue(id) {
+    const element = document.getElementById(id);
+    return element ? String(element.value || '').trim() : '';
+  }
+
+  function readVendorUpdateNumber(id) {
+    const value = readVendorUpdateValue(id);
+    if (!value) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function saveVendorUpdate() {
+    const po = poById.get(readVendorUpdateValue('vendor-update-po'));
+    if (!po) {
+      showToast('Select a PO before saving the vendor update.');
+      const select = document.getElementById('vendor-update-po');
+      if (select) select.focus();
+      return;
+    }
+
+    const entry = {
+      id: `vu-${Date.now()}-${state.vendorUpdateSequence}`,
+      po: po.po,
+      vendor: po.vendorId || '',
+      buyer: po.buyer || '',
+      tracking: readVendorUpdateValue('vendor-update-tracking'),
+      invoice: readVendorUpdateValue('vendor-update-invoice'),
+      vessel: readVendorUpdateValue('vendor-update-vessel'),
+      port: readVendorUpdateValue('vendor-update-port'),
+      etd: readVendorUpdateValue('vendor-update-etd'),
+      eta: readVendorUpdateValue('vendor-update-eta'),
+      warehouse: readVendorUpdateValue('vendor-update-warehouse'),
+      cartons: readVendorUpdateNumber('vendor-update-cartons'),
+      grossWeight: readVendorUpdateNumber('vendor-update-weight'),
+      cbm: readVendorUpdateNumber('vendor-update-cbm'),
+      status: readVendorUpdateValue('vendor-update-status'),
+      source: readVendorUpdateValue('vendor-update-source') || 'Email',
+      contact: readVendorUpdateValue('vendor-update-contact'),
+      notes: readVendorUpdateValue('vendor-update-notes'),
+      loggedAt: todayIso(),
+      loggedTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    const hasDetail = [
+      'tracking',
+      'invoice',
+      'vessel',
+      'port',
+      'etd',
+      'eta',
+      'warehouse',
+      'status',
+      'contact',
+      'notes',
+    ].some((key) => entry[key]) || ['cartons', 'grossWeight', 'cbm'].some((key) => entry[key] != null);
+
+    if (!hasDetail) {
+      showToast('Add at least one shipment detail before saving.');
+      return;
+    }
+
+    state.vendorUpdates.unshift(entry);
+    state.vendorUpdateSequence += 1;
+    state.vendorUpdatePo = po.po;
+    state.vendorUpdateQuery = '';
+    state.vendorUpdateStatus = '';
+    persistVendorUpdates();
+    render();
+    showToast(`Vendor update saved for ${po.po}.`);
+  }
+
+  function deleteVendorUpdate(id) {
+    const update = state.vendorUpdates.find((row) => row.id === id);
+    if (!update) return;
+    state.vendorUpdates = state.vendorUpdates.filter((row) => row.id !== id);
+    persistVendorUpdates();
+    render();
+    showToast(`Vendor update removed for ${update.po}.`);
+  }
+
+  function clearVendorUpdateForm() {
+    state.vendorUpdatePo = '';
+    render();
+    showToast('Vendor update form cleared.');
   }
 
   /* =========================================================================
@@ -1032,50 +1408,73 @@
     const host = document.getElementById('order-kpis');
     if (!host) return;
 
-    // Counts ignore the status filter so the cards stay usable while one is active.
-    const rows = filteredOrders({ status: '' });
+    // Counts ignore the status and bucket filters so the cards stay usable while one is active.
+    const rows = filteredOrders({ status: '', bucket: '' });
     const counts = {
-      'Overdue': 0,
-      'Unshipped balance': 0,
-      'Not shipped yet': 0,
+      'Open POs': 0,
       'In transit': 0,
+      'At risk': 0,
+      'Not yet planned': 0,
     };
-    let oldCount = 0;
-    let riskCount = 0;
+    let openValue = 0;
 
     rows.forEach(({ po, summary }) => {
-      if (counts[summary.status] != null) counts[summary.status] += 1;
-      if (summary.old) oldCount += 1;
-      if (poIsAtRisk(po, summary)) riskCount += 1;
+      const bucket = orderCoverageBucket(po, summary);
+      if (summary.balance > 0) {
+        counts['Open POs'] += 1;
+        openValue += summary.openValue;
+      }
+      if (bucket === 'In transit') counts['In transit'] += 1;
+      else if (bucket === 'At risk') counts['At risk'] += 1;
+      else if (bucket === 'Not yet planned') counts['Not yet planned'] += 1;
     });
 
+    const notYetPct = counts['Open POs']
+      ? Math.round((counts['Not yet planned'] / counts['Open POs']) * 100)
+      : 0;
     const cards = [
-      ['Overdue', 'Past ETA', 'Open receipt ETA is before the data date', true],
-      ['Unshipped balance', 'Unshipped balance', 'Part received; no shipment left', true],
-      ['Not shipped yet', 'Not shipped yet', `${formatNumber(oldCount)} over 90 days old`, oldCount > 0],
-      ['In transit', 'In transit', 'Open receipts or shipped containers', false],
+      {
+        key: 'Open POs',
+        note: `$${formatValue(openValue)} open value`,
+        hot: false,
+        title: 'Show all POs with an open balance',
+      },
+      {
+        key: 'In transit',
+        note: 'Open receipts or shipped containers',
+        hot: false,
+        title: 'Show POs with an open receipt or shipped units',
+      },
+      {
+        key: 'At risk',
+        note: 'No open receipt · unplanned balance',
+        hot: counts['At risk'] > 0,
+        title: 'Show POs with an unplanned balance and no open receipt',
+      },
+      {
+        key: 'Not yet planned',
+        note: `${notYetPct}% of open POs`,
+        hot: false,
+        title: 'Show open POs whose balance is not yet planned or in transit',
+        neutral: true,
+      },
     ];
 
-    host.innerHTML = cards.map(([status, label, note, hot]) => `
-      <button
-        class="card kp${hot ? ' hot' : ''}${state.statusFilter === status ? ' sel' : ''}"
-        data-action="status:${attr(status)}"
-        title="Show only ${attr(status)} POs"
-      >
-        <b>${formatNumber(counts[status])}</b>
-        <span class="sub">${esc(label)}</span>
-        <span class="sub">${esc(note)}</span>
-      </button>
-    `).join('') + `
-      <button
-        class="card kp${riskCount ? ' hot' : ''}"
-        data-action="go:followup"
-        title="Open Follow-ups to see balances with no receipt and some balance not planned"
-      >
-        <b>${formatNumber(riskCount)}</b>
-        <span class="sub">At risk</span>
-        <span class="sub">No open receipt; unplanned and over 90 days old or previously received</span>
-      </button>`;
+    host.innerHTML = cards.map((card) => {
+      const selected = card.key === 'Open POs'
+        ? state.orderBucketFilter === 'Open POs' || state.statusFilter === 'All open'
+        : state.orderBucketFilter === card.key;
+      return `
+        <button
+          class="card kp${card.hot ? ' hot' : ''}${card.neutral ? ' neutral' : ''}${selected ? ' sel' : ''}"
+          data-action="bucket:${attr(card.key)}"
+          title="${attr(card.title)}"
+        >
+          <b>${formatNumber(counts[card.key])}</b>
+          <span class="sub">${esc(card.key)}</span>
+          <span class="sub">${esc(card.note)}</span>
+        </button>`;
+    }).join('');
   }
 
   function paginationButtons(pages, current, action = 'page') {
@@ -1095,9 +1494,31 @@
     return html;
   }
 
-  function updateOrderTable() {
+  function orderPager(rows, start, pageSize, pages, position = '') {
+    const first = rows.length ? start + 1 : 0;
+    const last = Math.min(rows.length, start + pageSize);
+    return `
+      <div class="row order-pager ${attr(position)}">
+        <span class="sub">Showing ${formatNumber(first)}–${formatNumber(last)} of ${formatNumber(rows.length)} POs · Page ${state.orderPage} of ${pages}</span>
+        <span class="row pager-buttons">
+          <button class="s" data-action="page:1"${state.orderPage <= 1 ? ' disabled' : ''}>« First</button>
+          <button class="s" data-action="page:${state.orderPage - 1}"${state.orderPage <= 1 ? ' disabled' : ''}>‹ Prev</button>
+          ${paginationButtons(pages, state.orderPage)}
+          <button class="s" data-action="page:${state.orderPage + 1}"${state.orderPage >= pages ? ' disabled' : ''}>Next ›</button>
+          <button class="s" data-action="page:${pages}"${state.orderPage >= pages ? ' disabled' : ''}>Last »</button>
+        </span>
+      </div>`;
+  }
+
+  function updateOrderTable(options = {}) {
     const host = document.getElementById('order-table');
     if (!host) return;
+    const scrollHost = options.preserveScroll && host.querySelector
+      ? host.querySelector('.order-table-scroll')
+      : null;
+    const previousScroll = scrollHost
+      ? { top: scrollHost.scrollTop, left: scrollHost.scrollLeft }
+      : null;
 
     renderOrderKpis();
     const sortDirButton = document.querySelector('[data-action="sort-dir"]');
@@ -1110,45 +1531,45 @@
     const start = (state.orderPage - 1) * pageSize;
     const pageRows = rows.slice(start, start + pageSize);
 
-    host.innerHTML = `
-      <div class="row" style="margin-bottom:8px">
-        <span class="sub">${formatNumber(rows.length)} POs · ${formatNumber(Math.max(0, start + 1))}–${formatNumber(Math.min(rows.length, start + pageSize))} shown</span>
-        <span class="sub">Page ${state.orderPage} of ${pages}</span>
+    host.innerHTML = pageRows.length ? `
+      ${orderPager(rows, start, pageSize, pages, 'top')}
+      <div class="sc order-table-scroll">
+        <table class="order-table">
+          <thead>
+            <tr>
+              <th>PO</th>
+              <th>VENDOR</th>
+              <th>BUYER</th>
+              <th class="n">LINES</th>
+              <th class="n">ORDERED</th>
+              <th class="n">RECEIVED %</th>
+              <th class="n">PLANNED</th>
+              <th class="n">BALANCE</th>
+              <th class="n">UNPLANNED</th>
+              <th>ETA</th>
+              <th>SHIPMENT</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pageRows.map(({ po, summary }) => renderOrderRow(po, summary)).join('')}
+          </tbody>
+        </table>
       </div>
-      ${pageRows.length ? `
-        <div class="sc">
-          <table class="order-table">
-            <thead>
-              <tr>
-                <th>PO</th>
-                <th>VENDOR</th>
-                <th>BUYER</th>
-                <th class="n">LINES</th>
-                <th class="n">ORDERED</th>
-                <th class="n">RECEIVED %</th>
-                <th class="n">PLANNED</th>
-                <th class="n">BALANCE</th>
-                <th class="n">UNPLANNED</th>
-                <th>ETA</th>
-                <th>SHIPMENT</th>
-                <th>STATUS</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${pageRows.map(({ po, summary }) => renderOrderRow(po, summary)).join('')}
-            </tbody>
-          </table>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <span class="sub">Showing ${formatNumber(rows.length ? start + 1 : 0)}–${formatNumber(Math.min(rows.length, start + pageSize))} of ${formatNumber(rows.length)} POs</span>
-          <span class="row" style="gap:6px">
-            <button class="s" data-action="page:1"${state.orderPage <= 1 ? ' disabled' : ''}>« First</button>
-            <button class="s" data-action="page:${state.orderPage - 1}"${state.orderPage <= 1 ? ' disabled' : ''}>‹ Prev</button>
-            ${paginationButtons(pages, state.orderPage)}
-            <button class="s" data-action="page:${state.orderPage + 1}"${state.orderPage >= pages ? ' disabled' : ''}>Next ›</button>
-            <button class="s" data-action="page:${pages}"${state.orderPage >= pages ? ' disabled' : ''}>Last »</button>
-          </span>
-        </div>` : `<div class="sub">No POs match the current filters. Current segment: <b>${esc(SEGMENT_LABELS[state.segmentFilter] || 'All segments')}</b>. Switch to “All segments” to search POs outside it.</div>`}`;
+      ${orderPager(rows, start, pageSize, pages, 'bottom')}` : `
+      <div class="row" style="margin-bottom:8px">
+        <span class="sub">0 POs</span>
+        <span class="sub">Page 1 of 1</span>
+      </div>
+      <div class="sub">No POs match the current filters.</div>`;
+
+    if (previousScroll && host.querySelector) {
+      const nextScrollHost = host.querySelector('.order-table-scroll');
+      if (nextScrollHost) {
+        nextScrollHost.scrollTop = previousScroll.top;
+        nextScrollHost.scrollLeft = previousScroll.left;
+      }
+    }
   }
 
   function renderOrderRow(po, summary) {
@@ -1212,11 +1633,22 @@
         <div class="sub">${esc(label)}</div>
         <div>${esc(value)}</div>
       </div>`).join('');
+    const vendorUpdates = state.vendorUpdates.filter((update) => update.po === po.po);
+    const linePageSize = ORDER_LINE_PAGE_SIZE;
+    const linePages = Math.max(1, Math.ceil(po.lines.length / linePageSize));
+    const linePage = Math.min(Math.max(1, state.orderLinePages[po.po] || 1), linePages);
+    const lineStart = (linePage - 1) * linePageSize;
+    const pageLines = po.lines.slice(lineStart, lineStart + linePageSize);
 
     return `
       <div class="detail">
         ${po.synthetic ? `<div class="note bad-note">PO header missing in PurchPO. Vendor “${esc(po.vendorId || 'unknown')}” was inferred from the PO number; treat these values as incomplete.</div>` : ''}
         <div class="detail-grid">${headerGrid}</div>
+
+        <div class="row" style="justify-content:flex-start; margin:10px 0">
+          <button class="s" data-action="vendor-update:${attr(po.po)}">+ Log vendor update</button>
+          <span class="sub">${vendorUpdates.length ? `${formatNumber(vendorUpdates.length)} vendor update${vendorUpdates.length === 1 ? '' : 's'} logged for this PO.` : 'No vendor updates logged for this PO.'}</span>
+        </div>
 
         <h3>Shipments</h3>
         ${po.receipts.length ? `
@@ -1254,12 +1686,15 @@
           </div>` : '<div class="sub">No receipt matched to this PO.</div>'}
 
         <h3>Lines</h3>
-        <div class="sub" style="margin-bottom:8px">
-          Received is derived from ordered minus PO balance in this export. Planned is assigned to a draft or booked container. “In container” is on a container marked Shipped. “In transit” also includes open receipts.
+        <div class="row detail-lines-header" style="margin-bottom:8px">
+          <div class="sub">
+            Received is derived from ordered minus PO balance in this export. Planned is assigned to a draft or booked container. “In container” is on a container marked Shipped. “In transit” also includes open receipts.
+          </div>
+          ${po.lines.length ? `<span class="sub">${formatNumber(po.lines.length)} lines · showing ${formatNumber(lineStart + 1)}–${formatNumber(Math.min(po.lines.length, lineStart + linePageSize))}</span>` : ''}
         </div>
         ${po.lines.length ? `
-          <div class="sc">
-            <table class="compact-table">
+          <div class="sc detail-lines-scroll">
+            <table class="compact-table detail-lines-table">
               <thead>
                 <tr>
                   <th>ITEM</th>
@@ -1276,7 +1711,7 @@
                 </tr>
               </thead>
               <tbody>
-                ${po.lines.map((line) => {
+                ${pageLines.map((line) => {
                   const effective = effectiveBalance(line);
                   const status = lineStatus(line);
                   const open = openUnitsForLine(line);
@@ -1301,7 +1736,18 @@
                 }).join('')}
               </tbody>
             </table>
-          </div>` : '<div class="sub">This PO has no line items in the detail export.</div>'}
+          </div>
+          ${linePages > 1 ? `
+            <div class="row order-pager bottom line-pager">
+              <span class="sub">Lines page ${linePage} of ${linePages}</span>
+              <span class="row pager-buttons">
+                <button class="s" data-action="line-page:${attr(po.po)}:1"${linePage <= 1 ? ' disabled' : ''}>« First</button>
+                <button class="s" data-action="line-page:${attr(po.po)}:${linePage - 1}"${linePage <= 1 ? ' disabled' : ''}>‹ Prev</button>
+                ${paginationButtons(linePages, linePage, `line-page:${po.po}`)}
+                <button class="s" data-action="line-page:${attr(po.po)}:${linePage + 1}"${linePage >= linePages ? ' disabled' : ''}>Next ›</button>
+                <button class="s" data-action="line-page:${attr(po.po)}:${linePages}"${linePage >= linePages ? ' disabled' : ''}>Last »</button>
+              </span>
+            </div>` : ''}` : '<div class="sub">This PO has no line items in the detail export.</div>'}
       </div>`;
   }
 
@@ -1535,7 +1981,7 @@
       <div id="shipment-list"></div>
 
       <div class="card sub">
-        The Segment filter does not apply here: all receipts are shown. Warehouse “3 (likely)” is inferred from a “-W” tracking suffix when the warehouse field is blank.
+        Warehouse “3 (likely)” is inferred from a “-W” tracking suffix when the warehouse field is blank.
         <details class="more"><summary>Why some shipments have no matching PO</summary>
           A receipt can exist without a PO line that matches its invoice and item, or its PO may belong to the Other segment. Click a PO number to open it.
         </details>
@@ -1557,7 +2003,7 @@
     const receipts = openReceiveReceipts();
     if (!receipts.length) {
       return `
-        ${renderHeader('Receive one receipt (simulated)', `No open matched receipts in the current segment. Data as of ${AS_OF_LABEL}.`)}
+        ${renderHeader('Receive one receipt (simulated)', `No open matched receipts in the current filters. Data as of ${AS_OF_LABEL}.`)}
         <div class="card">${renderTag('wn', 'Simulated import')} <span class="sub">There is no open matched receipt to receive in this filter.</span></div>`;
     }
 
@@ -1870,23 +2316,12 @@
     const documents = importSampleDocuments();
     const preview = getImportPreview(documents);
 
-    const header = renderHeader(
-      'Import packing list (simulated)',
-      `Read one packing list and match every PO in the document at once. The sample uses real container/tracking groups and real PO lines; quantities are generated for the demo. Data as of ${AS_OF_LABEL}.`,
-      renderTag('wn', 'Simulated import')
-    );
-
-    const intro = `
-      <div class="card note">
-        <b>The receipt export has no line quantities.</b>
-        This page takes a real container/tracking group, generates sample shipped quantities for its open PO lines, previews the result for every PO in one table, then applies the quantities to this browser session. Nothing is uploaded, and nothing is written back to the CSV or Odoo.
-      </div>`;
+    const header = renderHeader('Import packing list');
 
     if (!preview) {
       return `
         ${header}
-        ${intro}
-        <div class="card sub">No container/tracking group with 4–6 matched POs and at least 4 open lines was found. The sample import needs those conditions to show a multi-PO document.</div>`;
+        <div class="card sub">No sample packing list found.</div>`;
     }
 
     const options = documents.map((document) => {
@@ -1906,38 +2341,25 @@
       });
     }
 
-    const rows = preview.pos.map((row) => {
-      const summary = getPoSummary(row.po);
+    const lineRows = preview.pos.flatMap((row) => {
       const matchType = row.receipts[0] ? row.receipts[0].matchType || '—' : '—';
-      const afterRisk = preview.applied && row.afterUnits > 0 && poIsAtRisk(row.po, summary);
-      return `
+      const listQty = new Map(row.entries.map((entry) => [entry.line.id, entry.qty]));
+
+      return row.po.lines.map((line) => `
         <tr>
           <td><a href="#orders" data-action="openpo:${attr(row.po.po)}"><b>${esc(row.po.po)}</b></a></td>
           <td>${esc(row.po.vendorId || '—')}</td>
-          <td class="n">${formatNumber(row.entries.length)}</td>
-          <td class="n"><b>${formatNumber(row.units)}</b></td>
-          <td class="n">${formatNumber(row.beforeUnits)}</td>
-          <td class="n">${row.afterUnits > 0 ? `<span class="late">${formatNumber(row.afterUnits)}</span>` : '0'}</td>
+          <td class="mono">${esc(line.itemId || '—')}</td>
+          <td>${esc(line.description || '—')}</td>
+          <td class="n">${formatNumber(line.ordered)}</td>
+          <td class="n">${formatNumber(openUnitsForLine(line))}</td>
+          <td class="n"><b>${formatNumber(listQty.get(line.id) || 0)}</b></td>
           <td>${esc(matchType)}</td>
-          <td>${row.entries.length ? `${renderStatusTag(summary.status)}${afterRisk ? ` ${renderTag('bad', 'At risk')}` : ''}` : renderTag('', 'No open balance')}</td>
-        </tr>`;
+        </tr>`);
     }).join('');
-
-    const lineRows = preview.pos.flatMap((row) =>
-      row.entries.map((entry) => `
-        <tr>
-          <td class="mono">${esc(row.po.po)}</td>
-          <td class="mono">${esc(entry.line.itemId || '—')}</td>
-          <td>${esc(entry.line.description || '—')}</td>
-          <td class="n"><b>${formatNumber(entry.qty)}</b></td>
-          <td class="n">${formatNumber(entry.before)}</td>
-          <td class="n">${formatNumber(entry.after)}</td>
-        </tr>`)
-    ).join('');
 
     return `
       ${header}
-      ${intro}
 
       <div class="card">
         <div class="row" style="align-items:flex-start">
@@ -1946,7 +2368,6 @@
             <select id="import-document" style="width:100%">
               ${options.map((option) => `<option value="${attr(option.key)}"${option.key === preview.key ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
             </select>
-            <div class="sub" style="margin-top:6px">All vendors and segments are shown so the document stays whole; the global filters do not apply on this page. Receipt documents are not split by PO/FOB segment.</div>
           </div>
           ${preview.applied ? renderTag('ok', 'Applied in this session') : renderTag('wn', 'Ready to apply')}
         </div>
@@ -1962,71 +2383,44 @@
         </div>
       </div>
 
-      <div class="card">
-        <div class="row">
-          <div>
-            <h2>Result for every PO in the document</h2>
-            <div class="sub">Every matched PO appears once, including POs with no open balance.</div>
-          </div>
-          <span class="sub">${formatNumber(preview.totalLines)} lines · ${formatNumber(preview.totalUnits)} units</span>
-        </div>
-        <div class="sc" style="margin-top:10px">
-          <table>
-            <thead>
-              <tr>
-                <th>PO</th>
-                <th>VENDOR</th>
-                <th class="n">LINES</th>
-                <th class="n">THIS LIST</th>
-                <th class="n">BALANCE BEFORE</th>
-                <th class="n" title="Expected balance after applying this list">BALANCE AFTER</th>
-                <th>MATCH</th>
-                <th>STATUS</th>
-              </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-        <div class="row" style="margin-top:12px">
-          <span class="sub">Applying updates PO balances in this session only. A real import would validate the file, match every PO, then post the receipt.</span>
-          <button class="p" data-action="apply-import"${preview.applied ? ' disabled' : ''}>${preview.applied ? 'Applied' : 'Apply sample import'}</button>
-        </div>
-      </div>
-
-      ${preview.applied ? `
-        <div class="card row" style="justify-content:flex-start">
-          <span class="sub">The remaining balances are now tracked. Open the Planner to plan Import remainders, or Follow-ups to see the automatic at-risk flag.</span>
-          <button class="s" data-action="go:planner">Open Planner</button>
-          <button class="s" data-action="go:followup">Open Follow-ups</button>
-        </div>` : ''}
-
       ${preview.totalLines ? `
         <div class="card">
           <div class="row">
             <h2>Packing list lines</h2>
-            <span class="sub">Sample quantities generated for the demo</span>
+            <span class="sub">${formatNumber(preview.totalLines)} lines on list · ${formatNumber(preview.totalUnits)} units</span>
           </div>
           <div class="sc" style="margin-top:10px">
             <table>
               <thead>
                 <tr>
                   <th>PO</th>
+                  <th>VENDOR</th>
                   <th>ITEM</th>
                   <th>DESCRIPTION</th>
+                  <th class="n">TOTAL QTY</th>
+                  <th class="n">BALANCE</th>
                   <th class="n">QTY ON LIST</th>
-                  <th class="n">BALANCE BEFORE</th>
-                  <th class="n">BALANCE AFTER</th>
+                  <th>MATCH</th>
                 </tr>
               </thead>
               <tbody>${lineRows}</tbody>
             </table>
           </div>
+          <div class="row" style="margin-top:12px; justify-content:flex-end">
+            <button class="p" data-action="apply-import"${preview.applied ? ' disabled' : ''}>${preview.applied ? 'Applied' : 'Apply sample import'}</button>
+          </div>
+        </div>` : ''}
+
+      ${preview.applied ? `
+        <div class="card row" style="justify-content:flex-start">
+          <button class="s" data-action="go:planner">Open Planner</button>
+          <button class="s" data-action="go:followup">Open Follow-ups</button>
         </div>` : ''}
     `;
   }
 
   /* =========================================================================
-     10. Planner (concept)
+     10. Planner
      ========================================================================= */
 
   function plannerItems() {
@@ -2055,6 +2449,16 @@
     return items;
   }
 
+  function filterPlannerItems(items) {
+    const query = String(state.plannerLineQuery || '').trim().toLowerCase();
+    if (!query) return items;
+    return items.filter((item) => [
+      item.po.po,
+      item.po.vendorId,
+      item.line.itemId,
+    ].join(' ').toLowerCase().includes(query));
+  }
+
   function syncPlannerAssigned() {
     const assigned = {};
     state.plannerContainers.forEach((container) => {
@@ -2081,14 +2485,35 @@
     return container.assignments.filter((assignment) => assignment.cbm == null).length;
   }
 
-  function addPlannerContainer(type) {
-    const key = CONTAINER_TYPES[type] ? type : '40HC';
+  function resolvePlannerContainer(value) {
+    const typed = String(value || '').trim();
+    if (!typed) return null;
+
+    const direct = Object.keys(CONTAINER_TYPES)
+      .find((key) => key.toLowerCase() === typed.toLowerCase());
+    if (direct) return { label: direct, capacity: CONTAINER_TYPES[direct].capacity };
+
+    const compact = typed.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const embedded = Object.keys(CONTAINER_TYPES).find((key) => compact.includes(key));
+    if (embedded) return { label: typed, capacity: CONTAINER_TYPES[embedded].capacity };
+
+    return { label: typed, capacity: CONTAINER_TYPES['40HC'].capacity };
+  }
+
+  function addPlannerContainer(value) {
+    const resolved = resolvePlannerContainer(value);
+    if (!resolved) {
+      showToast('Type a container (for example 40HC) before adding.');
+      document.getElementById('planner-container-type')?.focus();
+      return;
+    }
+
     const sequence = state.plannerContainerSequence + 1;
     state.plannerContainerSequence = sequence;
     state.plannerContainers.push({
       id: `C-${sequence}`,
-      type: key,
-      capacity: CONTAINER_TYPES[key].capacity,
+      type: resolved.label,
+      capacity: resolved.capacity,
       status: 'draft',
       sailingDate: '',
       port: '',
@@ -2096,7 +2521,7 @@
       assignments: [],
     });
     render();
-    showToast(`${key} container C-${sequence} created (${CONTAINER_TYPES[key].capacity} CBM assumption).`);
+    showToast(`${resolved.label} container C-${sequence} added (${resolved.capacity} CBM).`);
   }
 
   function removePlannerContainer(containerId) {
@@ -2237,26 +2662,67 @@
     );
   }
 
-  function requestedBlockUnits(lineId) {
-    const input = document.querySelector(`[data-block-qty="${lineId}"]`);
-    const value = input ? Number(input.value) : null;
-    return value && value > 0 ? value : null;
+  function requestPlanLine(lineId, containerId) {
+    const line = lineById.get(Number(lineId));
+    const container = state.plannerContainers.find((row) => row.id === containerId);
+    if (!line || !container) return false;
+
+    if (!containerIsEditable(container)) {
+      showToast(`${container.id} is ${CONTAINER_STATUSES[containerStatusKey(container)].label.toLowerCase()} and locked.`);
+      return false;
+    }
+
+    if (plannerRemaining(line) <= 0) {
+      showToast('This line is already fully planned or shipped.');
+      return false;
+    }
+
+    state.plannerSelectedLineId = null;
+    state.plannerPendingAssignment = { lineId: line.id, containerId: container.id };
+    render();
+    setTimeout(() => {
+      const input = document.getElementById('planner-assignment-qty');
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    }, 0);
+    return true;
+  }
+
+  function cancelPlannerAssignment() {
+    if (!state.plannerPendingAssignment) return;
+    state.plannerPendingAssignment = null;
+    render();
+  }
+
+  function confirmPlannerAssignment() {
+    const pending = state.plannerPendingAssignment;
+    if (!pending) return;
+    const input = document.getElementById('planner-assignment-qty');
+    const requested = Number(input ? input.value : '');
+    if (!Number.isFinite(requested) || requested <= 0) {
+      showToast('Enter a quantity greater than 0.');
+      if (input) input.focus();
+      return;
+    }
+    planLine(pending.lineId, pending.containerId, requested);
   }
 
   function planLine(lineId, containerId, requestedUnits = null) {
     const line = lineById.get(Number(lineId));
     const container = state.plannerContainers.find((row) => row.id === containerId);
-    if (!line || !container) return;
+    if (!line || !container) return false;
 
     if (!containerIsEditable(container)) {
       showToast(`${container.id} is ${CONTAINER_STATUSES[containerStatusKey(container)].label.toLowerCase()} and locked.`);
-      return;
+      return false;
     }
 
     const remaining = plannerRemaining(line);
     if (remaining <= 0) {
       showToast('This line is already fully planned or shipped.');
-      return;
+      return false;
     }
 
     const carton = line.boxQty > 0 ? line.boxQty : 1;
@@ -2289,9 +2755,9 @@
       showToast(
         cbmLimited
           ? `Not enough CBM left in ${container.id} for this block.`
-          : `Block qty must be at least one full carton (${formatNumber(carton)} units).`
+          : `Quantity must be at least one full carton (${formatNumber(carton)} units).`
       );
-      return;
+      return false;
     }
 
     const cbm = cbmPerUnit == null ? null : units * cbmPerUnit;
@@ -2301,8 +2767,10 @@
     container.assignments.push({ lineId: line.id, units, cbm, carton, block: `B${blockNumber}` });
     syncPlannerAssigned();
     state.plannerSelectedLineId = null;
+    state.plannerPendingAssignment = null;
     render();
     showToast(`${formatNumber(units)} units of ${line.itemId} planned into ${container.id} as block B${blockNumber}${cbm == null ? ' — CBM missing' : ''}.`);
+    return true;
   }
 
   function renderPlannerLine(item) {
@@ -2330,33 +2798,79 @@
           ${cbm == null ? 'CBM missing' : formatCbm(cbm)}
         </div>
         ${tags.length ? `<div>${tags.join(' ')}</div>` : ''}
-        <div class="block-split">
-          <span class="sub">Block qty</span>
-          <input
-            class="qty-input block-qty"
-            type="number"
-            min="1"
-            max="${remaining}"
-            step="1"
-            value="${remaining}"
-            data-block-qty="${line.id}"
-            title="Set a smaller quantity to split this line across containers"
-          >
-        </div>
       </div>`;
   }
 
-  function renderPlanner() {
-    const items = plannerItems();
-    const importRows = Array.from(poById.values())
-      .filter((po) => po.segment === 'import' && poMatchesGlobal(po));
-    const openImportVolume = importRows.reduce((sum, po) => sum + getPoSummary(po).openCbm, 0);
-    const missingCbmLines = importRows.reduce((sum, po) => sum + getPoSummary(po).missingCbmOpen, 0);
+  function renderPlannerLineGroups(items) {
     const byPo = new Map();
     items.forEach((item) => {
       if (!byPo.has(item.po.po)) byPo.set(item.po.po, { po: item.po, items: [] });
       byPo.get(item.po.po).items.push(item);
     });
+
+    return Array.from(byPo.values()).map((group) => `
+      <div class="gh">${esc(group.po.po)} · ${esc(group.po.vendorId || '—')}</div>
+      ${group.items.map(renderPlannerLine).join('')}
+    `).join('') || `<div class="sub">${state.plannerLineQuery ? 'No import lines match this search.' : 'No open Import balances without an open receipt in this filter.'}</div>`;
+  }
+
+  function updatePlannerLines() {
+    const host = document.getElementById('planner-lines-zone');
+    if (!host) return;
+    const items = filterPlannerItems(plannerItems());
+    host.innerHTML = renderPlannerLineGroups(items);
+    const count = document.getElementById('planner-lines-count');
+    if (count) count.textContent = formatNumber(items.length);
+    bindPlannerDragAndDrop();
+  }
+
+  function renderPlannerAssignmentDialog() {
+    const pending = state.plannerPendingAssignment;
+    if (!pending) return '';
+
+    const line = lineById.get(Number(pending.lineId));
+    const container = state.plannerContainers.find((row) => row.id === pending.containerId);
+    if (!line || !container) return '';
+
+    const remaining = plannerRemaining(line);
+    if (remaining <= 0) return '';
+    const carton = line.boxQty > 0 ? line.boxQty : 1;
+
+    return `
+      <div class="modal-backdrop">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="planner-assignment-title">
+          <div>
+            <h2 id="planner-assignment-title">Add quantity</h2>
+            <div class="sub">${esc(container.id)} · ${esc(container.type)}</div>
+          </div>
+          <div class="assignment-summary">
+            <b class="mono">${esc(line.itemId || '—')}</b> · ${esc(line.description || '—')}
+            <div class="sub">
+              ${line.poRef ? `${esc(line.poRef.po)} · ` : ''}${formatNumber(remaining)} units available ·
+              carton size ${formatNumber(carton)}
+            </div>
+          </div>
+          <label class="field-label" for="planner-assignment-qty">Quantity to add</label>
+          <input
+            id="planner-assignment-qty"
+            class="qty-input assignment-qty"
+            type="number"
+            min="1"
+            max="${remaining}"
+            step="1"
+            value="${remaining}"
+          >
+          <div class="modal-actions">
+            <button class="s" data-action="cancel-planner-assignment">Cancel</button>
+            <button class="p" data-action="confirm-planner-assignment">Add to container</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderPlanner() {
+    const allItems = plannerItems();
+    const items = filterPlannerItems(allItems);
 
     const missingCbmAssignments = state.plannerContainers
       .reduce((sum, container) => sum + plannerMissingCbm(container), 0);
@@ -2378,15 +2892,9 @@
     const plannedUnits = state.plannerContainers
       .filter((container) => containerIsEditable(container))
       .reduce((sum, container) => sum + containerUnits(container), 0);
-    const plannedBlocks = state.plannerContainers
-      .filter((container) => containerIsEditable(container))
-      .reduce((sum, container) => sum + container.assignments.length, 0);
     const shippedUnits = state.plannerContainers
       .filter((container) => containerStatusKey(container) === 'shipped')
       .reduce((sum, container) => sum + containerUnits(container), 0);
-    const shippedBlocks = state.plannerContainers
-      .filter((container) => containerStatusKey(container) === 'shipped')
-      .reduce((sum, container) => sum + container.assignments.length, 0);
     const arrivedUnits = state.plannerContainers
       .filter((container) => containerStatusKey(container) === 'arrived')
       .reduce((sum, container) => sum + containerUnits(container), 0);
@@ -2394,38 +2902,42 @@
       counts[key] = state.plannerContainers.filter((container) => containerStatusKey(container) === key).length;
       return counts;
     }, {});
-    const remainingUnits = items.reduce((sum, item) => sum + item.remaining, 0);
+    const remainingUnits = allItems.reduce((sum, item) => sum + item.remaining, 0);
 
     return `
-      ${renderHeader(
-        'Planner (concept)',
-        `Open Import balances that are not covered by an open receipt — including remainders of partly received POs. Plans live only in this browser session. Data as of ${AS_OF_LABEL}.`,
-        `<div class="planner-heading-meta"><span class="sub">Open import volume: ${formatCbm(openImportVolume)} (${formatNumber(missingCbmLines)} lines lack CBM)</span>${renderTag('wn', 'Concept')}</div>`
-      )}
-
-      <div class="card banner">
-        <b>Concept: planning data does not exist in today’s systems. Plans live only in this session.</b>
-        <div class="sub">Container types and capacities are assumptions: 40HC 68 CBM, 40ST 58 CBM, 20GP 28 CBM. They are not in the CSV exports. Set a smaller <b>Block qty</b> before assigning to split one PO line across containers. Set a sailing date and port, then <b>Mark as shipped</b> to move assigned units into In transit. <b>Mark arrived</b> adds them to received balances in this session.</div>
-      </div>
+      ${renderHeader('Planner')}
 
       <div class="card row" style="justify-content:flex-start">
-        <select id="planner-container-type">${typeOptions}</select>
+        <input
+          id="planner-container-type"
+          class="planner-container-input"
+          type="text"
+          list="planner-container-types"
+          placeholder="Type container (e.g. 40HC)"
+          autocomplete="off"
+        >
+        <datalist id="planner-container-types">${typeOptions}</datalist>
         <button class="p" data-action="add-container">Add container</button>
         ${statusCounts.draft + statusCounts.booked ? `<button class="s" data-action="clear-plan" title="Removes draft and booked containers only. Shipped and arrived containers stay.">Clear draft/booked</button>` : ''}
-        <span class="sub">${formatNumber(items.length)} open line${items.length === 1 ? '' : 's'} awaiting a plan</span>
-        <span class="sub">${formatNumber(plannedBlocks)} active block${plannedBlocks === 1 ? '' : 's'} · ${formatNumber(plannedUnits)} units planned · ${formatNumber(shippedBlocks)} shipped block${shippedBlocks === 1 ? '' : 's'} (${formatNumber(shippedUnits)} units) · ${formatNumber(arrivedUnits)} units arrived · ${formatNumber(remainingUnits)} units still unplanned</span>
+        <span class="sub">${formatNumber(allItems.length)} open line${allItems.length === 1 ? '' : 's'}</span>
+        <span class="sub">${formatNumber(plannedUnits)} units planned · ${formatNumber(shippedUnits)} shipped · ${formatNumber(arrivedUnits)} arrived · ${formatNumber(remainingUnits)} unplanned</span>
         <span class="sub">Containers: ${formatNumber(statusCounts.draft)} draft · ${formatNumber(statusCounts.booked)} booked · ${formatNumber(statusCounts.shipped)} shipped · ${formatNumber(statusCounts.arrived)} arrived</span>
         ${missingCbmAssignments ? renderTag('bad', `${missingCbmAssignments} assigned line${missingCbmAssignments === 1 ? '' : 's'} with CBM missing`, 'The fill bar excludes CBM-missing assignments.') : ''}
       </div>
 
       <div class="cols">
         <div class="card">
-          <h2>Not yet planned and At risk import lines (${formatNumber(items.length)})</h2>
-          <div class="zone big" data-planner-zone="">
-            ${Array.from(byPo.values()).map((group) => `
-              <div class="gh">${esc(group.po.po)} · ${esc(group.po.vendorId || '—')}</div>
-              ${group.items.map(renderPlannerLine).join('')}
-            `).join('') || '<div class="sub">No open Import balances without an open receipt in this filter.</div>'}
+          <h2>Not yet planned and At risk import lines (<span id="planner-lines-count">${formatNumber(items.length)}</span>)</h2>
+          <div class="row" style="justify-content:flex-start; margin-bottom:8px">
+            <input
+              type="search"
+              id="planner-line-search"
+              placeholder="Search vendor, PO or item ID"
+              value="${attr(state.plannerLineQuery)}"
+            >
+          </div>
+          <div class="zone big" id="planner-lines-zone" data-planner-zone="">
+            ${renderPlannerLineGroups(items)}
           </div>
         </div>
 
@@ -2440,15 +2952,6 @@
             const units = containerUnits(container);
             const hasBlocks = container.assignments.length > 0;
             const locked = !editable || fill > 100;
-            const sailingLabel = container.sailingDate ? formatDate(container.sailingDate) : '';
-            const portLabel = container.port ? esc(container.port) : '';
-            const statusNote = statusKey === 'draft'
-              ? 'Draft — not booked yet.'
-              : statusKey === 'booked'
-                ? `Booked${sailingLabel ? ` · sailing ${sailingLabel}` : ''}${portLabel ? ` · ${portLabel}` : ''} — waiting to sail.`
-                : statusKey === 'shipped'
-                  ? `Shipped${sailingLabel ? ` · sailing ${sailingLabel}` : ''}${portLabel ? ` · ${portLabel}` : ''} — units are in transit.`
-                  : `Arrived${container.arrivedDate ? ` ${formatDate(container.arrivedDate)}` : ''}${portLabel ? ` · ${portLabel}` : ''} — units added to received balances.`;
             return `
               <div class="card">
                 <div class="row">
@@ -2460,18 +2963,19 @@
                     ${editable ? `<button class="s" data-action="remove-container:${attr(container.id)}" title="Remove this draft or booked container.">Remove</button>` : ''}
                   </div>
                 </div>
-                <div class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</div>
-                <div class="container-meta">
-                  <label>
-                    <span class="field-label">Sailing date</span>
-                    <input type="date" data-container-sailing="${attr(container.id)}" value="${attr(container.sailingDate || '')}">
-                  </label>
-                  <label>
-                    <span class="field-label">Port</span>
-                    <input type="text" data-container-port="${attr(container.id)}" value="${attr(container.port || '')}" placeholder="e.g. Los Angeles">
-                  </label>
+                <div class="container-summary">
+                  <span class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</span>
+                  <div class="container-meta">
+                    <label>
+                      <span class="field-label">Sailing</span>
+                      <input type="date" data-container-sailing="${attr(container.id)}" value="${attr(container.sailingDate || '')}">
+                    </label>
+                    <label>
+                      <span class="field-label">Port</span>
+                      <input type="text" data-container-port="${attr(container.id)}" value="${attr(container.port || '')}" placeholder="Port">
+                    </label>
+                  </div>
                 </div>
-                <div class="sub container-note">${statusNote}</div>
                 <div class="bar">
                   <i class="${fill > 100 ? 'r' : ''}" style="width:${Math.min(100, fill)}%"></i>
                 </div>
@@ -2479,7 +2983,7 @@
                   ${fill.toFixed(1)}% full${fill > 100 ? ' · OVER CAPACITY' : ''}
                   ${missing ? ` · ${missing} CBM-missing assignment${missing === 1 ? '' : 's'}` : ''}
                 </div>
-                <div class="zone${locked ? ' lock' : ''}" data-planner-zone="${attr(container.id)}">
+                <div class="zone container-drop${locked ? ' lock' : ''}" data-planner-zone="${attr(container.id)}">
                   ${container.assignments.map((assignment, index) => {
                     const line = lineById.get(assignment.lineId);
                     const block = blockLabels.get(`${container.id}:${index}`) || 'B1';
@@ -2491,18 +2995,14 @@
                         · ${assignment.cbm == null ? 'CBM missing' : formatCbm(assignment.cbm)}
                         ${editable ? `<button class="s" data-action="unassign:${attr(container.id)}:${assignment.lineId}:${index}">Remove</button>` : ''}
                       </div>`;
-                  }).join('') || `<div class="sub">${editable ? 'Drop lines here, or tap a line then tap this container.' : 'No blocks on this container.'}</div>`}
-                  ${editable && container.assignments.length ? '<div class="sub">Drop more lines here, or tap a line then tap this container.</div>' : ''}
-                  ${!editable ? `<div class="sub">${statusKey === 'shipped' ? 'Locked — assigned units are in transit.' : 'Locked — assigned units have arrived.'}</div>` : ''}
+                  }).join('') || `<div class="sub">${editable ? 'Drop lines here.' : 'No blocks.'}</div>`}
                 </div>
               </div>`;
           }).join('') || '<div class="card sub">No containers yet. Add one to start planning.</div>'}
         </div>
       </div>
 
-      <div class="card sub">
-        Plans are not saved and are not sent to any system. Container statuses, sailing dates and ports are session-only simulations. Quantities snap down to whole cartons using BoxQty, except a final balance smaller than one carton, which can be planned as a partial block. ${formatNumber(HEALTH.cartonMultiple.ok)} of ${formatNumber(HEALTH.cartonMultiple.total)} Import lines are exact carton multiples, ${formatNumber(HEALTH.cartonMultiple.missingBoxQty)} have no BoxQty, and ${formatNumber(HEALTH.cartonMultiple.total - HEALTH.cartonMultiple.ok - HEALTH.cartonMultiple.missingBoxQty)} are not exact multiples. Planned quantities reduce the red <b>Unplanned</b> balances on Purchase orders. Marking a container shipped moves its units from Planned to In transit; marking it arrived adds them to Received.
-      </div>`;
+      ${renderPlannerAssignmentDialog()}`;
   }
 
   /* =========================================================================
@@ -2788,8 +3288,10 @@
     ['WORKSPACE', [['home', 'Dashboard']]],
     ['PROCURE', [
       ['orders', 'Purchase orders'],
+      ['vendors', 'Vendors'],
       ['shipments', 'Shipments'],
-      ['planner', 'Planner (concept)'],
+      ['vendor-updates', 'Vendor updates'],
+      ['planner', 'Planner'],
     ]],
     ['RECEIVE', [
       ['receive', 'Receive one receipt'],
@@ -2830,7 +3332,9 @@
   const VIEWS = {
     home: renderHome,
     orders: renderOrders,
+    vendors: renderVendors,
     shipments: renderShipments,
+    'vendor-updates': renderVendorUpdates,
     planner: renderPlanner,
     receive: renderReceive,
     import: renderImport,
@@ -2865,10 +3369,8 @@
   function syncGlobalFilters() {
     const vendor = document.getElementById('vendor-filter');
     const buyer = document.getElementById('buyer-filter');
-    const segment = document.getElementById('segment-filter');
     if (vendor) vendor.value = state.vendorFilter;
     if (buyer) buyer.value = state.buyerFilter;
-    if (segment) segment.value = state.segmentFilter;
   }
 
   function render() {
@@ -2895,6 +3397,10 @@
 
     if (viewKey === 'shipments') {
       updateShipmentList();
+    }
+
+    if (viewKey === 'vendor-updates') {
+      updateVendorUpdatePoMeta();
     }
 
     if (viewKey === 'planner') bindPlannerDragAndDrop();
@@ -2925,7 +3431,7 @@
         const containerId = zone.dataset.plannerZone;
         if (!containerId) return;
         const lineId = Number(event.dataTransfer.getData('text/plain'));
-        planLine(lineId, containerId, requestedBlockUnits(lineId));
+        requestPlanLine(lineId, containerId);
       };
     });
   }
@@ -2938,7 +3444,8 @@
 
       case 'open-open-orders':
         state.searchQuery = '';
-        state.statusFilter = 'All open';
+        state.statusFilter = '';
+        state.orderBucketFilter = 'Open POs';
         state.portFilter = '';
         state.includeHeaderOnly = false;
         state.orderPage = 1;
@@ -2962,16 +3469,40 @@
         break;
 
       case 'vendors-all':
-        state.searchQuery = '';
-        state.statusFilter = '';
-        state.portFilter = '';
         state.vendorFilter = '';
         state.buyerFilter = '';
+        state.segmentFilter = 'all';
+        setView('vendors');
+        break;
+
+      case 'vendor-orders':
+        state.vendorFilter = args[0] || '';
+        state.searchQuery = '';
+        state.statusFilter = '';
+        state.orderBucketFilter = '';
+        state.portFilter = '';
         state.includeHeaderOnly = false;
-        state.sortBy = 'vendor';
-        state.sortDir = 'asc';
         state.orderPage = 1;
         setView('orders');
+        break;
+
+      case 'vendor-update':
+        state.vendorUpdatePo = args[0] || '';
+        state.vendorUpdateQuery = args[0] || '';
+        state.vendorUpdateStatus = '';
+        setView('vendor-updates');
+        break;
+
+      case 'save-vendor-update':
+        saveVendorUpdate();
+        break;
+
+      case 'delete-vendor-update':
+        deleteVendorUpdate(args[0]);
+        break;
+
+      case 'clear-vendor-update-form':
+        clearVendorUpdateForm();
         break;
 
       case 'openpo': {
@@ -2984,6 +3515,7 @@
         }
         state.searchQuery = args[0] || '';
         state.statusFilter = '';
+        state.orderBucketFilter = '';
         state.portFilter = '';
         state.orderPage = 1;
         state.includeHeaderOnly = true;
@@ -2996,7 +3528,7 @@
         const po = args[0];
         if (state.expandedOrders.has(po)) state.expandedOrders.delete(po);
         else state.expandedOrders.add(po);
-        updateOrderTable();
+        updateOrderTable({ preserveScroll: true });
         break;
       }
 
@@ -3004,6 +3536,25 @@
         state.orderPage = Number(args[0]) || 1;
         updateOrderTable();
         break;
+
+      case 'bucket': {
+        const bucket = args.join(':');
+        state.orderBucketFilter = state.orderBucketFilter === bucket ? '' : bucket;
+        state.statusFilter = '';
+        state.orderPage = 1;
+        updateOrderTable();
+        const select = document.getElementById('order-status');
+        if (select) select.value = '';
+        break;
+      }
+
+      case 'line-page': {
+        const poNumber = args[0];
+        const page = Number(args[1]) || 1;
+        state.orderLinePages[poNumber] = page;
+        updateOrderTable({ preserveScroll: true });
+        break;
+      }
 
       case 'ship-status': {
         const status = args[0] || '';
@@ -3046,6 +3597,7 @@
       case 'status': {
         const status = args.join(':');
         state.statusFilter = state.statusFilter === status ? '' : status;
+        state.orderBucketFilter = '';
         state.orderPage = 1;
         updateOrderTable();
         const select = document.getElementById('order-status');
@@ -3060,7 +3612,7 @@
         break;
 
       case 'add-container':
-        addPlannerContainer(document.getElementById('planner-container-type')?.value || '40HC');
+        addPlannerContainer(document.getElementById('planner-container-type')?.value || '');
         break;
 
       case 'book-container':
@@ -3085,6 +3637,14 @@
 
       case 'clear-plan':
         clearPlanner();
+        break;
+
+      case 'confirm-planner-assignment':
+        confirmPlannerAssignment();
+        break;
+
+      case 'cancel-planner-assignment':
+        cancelPlannerAssignment();
         break;
 
       case 'confirm-receive':
@@ -3130,23 +3690,11 @@
       return;
     }
 
-    /* Editing a block quantity also selects that line, without re-rendering
-       and losing the value or focus. */
-    const blockQtyInput = event.target.closest('[data-block-qty]');
-    if (blockQtyInput) {
-      const id = Number(blockQtyInput.dataset.blockQty);
-      state.plannerSelectedLineId = id;
-      document.querySelectorAll('[data-planner-line]').forEach((element) => {
-        element.classList.toggle('sel', Number(element.dataset.plannerLine) === id);
-      });
-      return;
-    }
-
     const plannerZone = event.target.closest('[data-planner-zone]');
     if (plannerZone && state.plannerSelectedLineId !== null && !event.target.closest('[data-action]')) {
       const containerId = plannerZone.dataset.plannerZone;
       if (containerId) {
-        planLine(state.plannerSelectedLineId, containerId, requestedBlockUnits(state.plannerSelectedLineId));
+        requestPlanLine(state.plannerSelectedLineId, containerId);
         return;
       }
     }
@@ -3158,8 +3706,16 @@
     handleAction(action, args);
   });
 
+  document.addEventListener('submit', (event) => {
+    if (event.target.id !== 'vendor-update-form') return;
+    event.preventDefault();
+    saveVendorUpdate();
+  });
+
   let searchTimer = null;
   let shipmentSearchTimer = null;
+  let vendorUpdateSearchTimer = null;
+  let plannerLineSearchTimer = null;
 
   document.addEventListener('input', (event) => {
     if (updateContainerFieldFromEvent(event)) return;
@@ -3175,6 +3731,26 @@
       return;
     }
 
+    if (event.target.id === 'planner-line-search') {
+      clearTimeout(plannerLineSearchTimer);
+      const value = event.target.value;
+      plannerLineSearchTimer = setTimeout(() => {
+        state.plannerLineQuery = value;
+        updatePlannerLines();
+      }, 200);
+      return;
+    }
+
+    if (event.target.id === 'vendor-update-search') {
+      clearTimeout(vendorUpdateSearchTimer);
+      const value = event.target.value;
+      vendorUpdateSearchTimer = setTimeout(() => {
+        state.vendorUpdateQuery = value;
+        updateVendorUpdateList();
+      }, 200);
+      return;
+    }
+
     if (event.target.id !== 'shipment-search') return;
     clearTimeout(shipmentSearchTimer);
     const value = event.target.value;
@@ -3183,6 +3759,25 @@
       state.shipmentPage = 1;
       updateShipmentList();
     }, 200);
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.target.id === 'planner-container-type' && event.key === 'Enter') {
+      event.preventDefault();
+      addPlannerContainer(event.target.value);
+      return;
+    }
+
+    if (!state.plannerPendingAssignment) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelPlannerAssignment();
+      return;
+    }
+    if (event.target.id === 'planner-assignment-qty' && event.key === 'Enter') {
+      event.preventDefault();
+      confirmPlannerAssignment();
+    }
   });
 
   document.addEventListener('change', (event) => {
@@ -3201,15 +3796,19 @@
         render();
         break;
 
-      case 'segment-filter':
-        state.segmentFilter = event.target.value;
-        state.orderPage = 1;
-        state.receiveReceiptId = '';
-        render();
+      case 'vendor-update-po':
+        state.vendorUpdatePo = event.target.value;
+        updateVendorUpdatePoMeta();
+        break;
+
+      case 'vendor-update-status-filter':
+        state.vendorUpdateStatus = event.target.value;
+        updateVendorUpdateList();
         break;
 
       case 'order-status':
         state.statusFilter = event.target.value;
+        state.orderBucketFilter = '';
         state.orderPage = 1;
         updateOrderTable();
         break;
@@ -3285,13 +3884,6 @@
     document.getElementById('buyer-filter').innerHTML =
       '<option value="">All buyers</option>' +
       buyers.map((buyer) => `<option value="${attr(buyer)}"${state.buyerFilter === buyer ? ' selected' : ''}>${esc(buyer)}</option>`).join('');
-
-    const segment = document.getElementById('segment-filter');
-    segment.innerHTML = `
-      <option value="import"${state.segmentFilter === 'import' ? ' selected' : ''}>Import</option>
-      <option value="domestic"${state.segmentFilter === 'domestic' ? ' selected' : ''}>Domestic/custom</option>
-      <option value="other"${state.segmentFilter === 'other' ? ' selected' : ''}>Other</option>
-      <option value="all"${state.segmentFilter === 'all' ? ' selected' : ''}>All segments</option>`;
   }
 
   window.addEventListener('hashchange', () => {
@@ -3299,6 +3891,8 @@
     render();
   });
 
+  state.vendorUpdates = loadVendorUpdates();
+  state.vendorUpdateSequence = state.vendorUpdates.length;
   populateFilters();
   render();
 })();

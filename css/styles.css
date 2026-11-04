@@ -218,7 +218,8 @@ aside a.dis {
 }
 
 select,
-input[type="search"] {
+input[type="search"],
+.planner-container-input {
   height: 38px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -226,6 +227,10 @@ input[type="search"] {
   background: var(--card);
   color: var(--ink);
   font: inherit;
+}
+
+.planner-container-input {
+  min-width: 210px;
 }
 
 main {
@@ -307,12 +312,14 @@ h2 {
   margin-top: 2px;
 }
 
-.home-kpis .kp.neutral {
+.home-kpis .kp.neutral,
+#order-kpis .kp.neutral {
   border-color: #cbd1d9;
   background: #f0f2f4;
 }
 
-.home-kpis .kp.neutral b {
+.home-kpis .kp.neutral b,
+#order-kpis .kp.neutral b {
   color: #53606d;
 }
 
@@ -436,14 +443,6 @@ h2 {
   place-items: center;
   color: var(--mut);
   font-size: 13px;
-}
-
-.planner-heading-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 /* KPI cards -------------------------------------------------------------- */
@@ -737,41 +736,52 @@ button.s {
   background: var(--bg);
 }
 
-.block-split {
+.container-summary {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.block-qty {
-  width: 96px;
-  height: 28px;
-  padding: 0 6px;
-}
-
-.blk input {
-  cursor: text;
+  gap: 5px 10px;
+  margin-top: 4px;
 }
 
 .container-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 8px;
-  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.container-meta label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.container-meta .field-label {
+  margin: 0;
+  font-size: 10px;
 }
 
 .container-meta input {
-  width: 100%;
-  height: 34px;
-  margin-top: 3px;
+  width: auto;
+  height: 26px;
+  margin-top: 0;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 0 8px;
+  border-radius: 6px;
+  padding: 0 6px;
   background: var(--card);
   color: var(--ink);
   font: inherit;
+  font-size: 12px;
+}
+
+.container-meta input[type="date"] {
+  width: 134px;
+}
+
+.container-meta input[type="text"] {
+  width: 112px;
 }
 
 .container-actions {
@@ -781,12 +791,59 @@ button.s {
   align-items: center;
 }
 
-.container-note {
-  margin-top: 8px;
-}
-
 .zone.lock .blk {
   cursor: default;
+}
+
+/* Planner quantity dialog ------------------------------------------------ */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(8, 17, 29, 0.45);
+}
+
+.modal-card {
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.25);
+}
+
+.modal-card h2 {
+  margin: 0;
+}
+
+.assignment-summary {
+  padding: 9px 10px;
+  border-left: 3px solid var(--acc);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.assignment-summary .sub {
+  margin-top: 3px;
+}
+
+.assignment-qty {
+  width: 100%;
+  height: 40px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
 }
 
 /* Capacity bar ----------------------------------------------------------- */
@@ -864,6 +921,96 @@ button.s {
   margin-bottom: 5px;
 }
 
+/* Vendor updates ---------------------------------------------------------- */
+.tb .vendor-update-cta {
+  margin-left: auto;
+}
+
+.vendor-update-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 430px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.vendor-update-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vf-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.vf {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mut);
+}
+
+.vendor-update-form input,
+.vendor-update-form select,
+.vendor-update-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+}
+
+.vendor-update-form input,
+.vendor-update-form select {
+  height: 38px;
+  padding: 0 10px;
+}
+
+.vendor-update-form textarea {
+  min-height: 76px;
+  padding: 9px 10px;
+  resize: vertical;
+}
+
+.vendor-update-meta {
+  border-left: 3px solid var(--acc);
+  background: var(--bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--mut);
+}
+
+.vendor-update-notes {
+  margin-top: 4px;
+  max-width: 320px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.vendor-updates-table td {
+  vertical-align: top;
+}
+
+.vendor-updates-table td .sub {
+  display: block;
+}
+
+.vendor-updates-table th:nth-child(1) { width: 19%; }
+.vendor-updates-table th:nth-child(2) { width: 22%; }
+.vendor-updates-table th:nth-child(3) { width: 12%; }
+.vendor-updates-table th:nth-child(4) { width: 13%; }
+.vendor-updates-table th:nth-child(5) { width: 28%; }
+.vendor-updates-table th:nth-child(6) { width: 6%; }
+
 .check {
   display: inline-flex;
   gap: 7px;
@@ -925,6 +1072,50 @@ button.s {
   min-width: 1420px;
 }
 
+.order-table-scroll {
+  max-width: 100%;
+  max-height: 72vh;
+  overflow: auto;
+}
+
+.order-table-scroll > .order-table > thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
+}
+
+.order-pager {
+  gap: 8px;
+}
+
+.order-pager.top {
+  margin-bottom: 8px;
+}
+
+.order-pager.bottom {
+  margin-top: 10px;
+}
+
+.pager-buttons {
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.line-pager,
+.line-pager .pager-buttons,
+.detail-lines-header {
+  justify-content: flex-start;
+}
+
+.detail-lines-scroll {
+  max-width: 100%;
+}
+
+.detail-lines-table td {
+  overflow-wrap: anywhere;
+}
+
 tr.total-row td {
   border-top: 2px solid var(--line);
   background: var(--bg);
@@ -969,8 +1160,18 @@ button:disabled {
   cursor: grab;
 }
 
+.ctns .card {
+  display: flex;
+  flex-direction: column;
+}
+
 .ctns .card .zone {
-  min-height: 82px;
+  min-height: 170px;
+  flex: 1 1 auto;
+}
+
+.ctns .card .zone.container-drop {
+  background: var(--bg);
 }
 
 /* Shipments -------------------------------------------------------------- */
@@ -1076,10 +1277,33 @@ details.more summary {
   .tb {
     padding: 10px 14px;
   }
+
+  .tb .vendor-update-cta {
+    margin-left: 0;
+  }
 }
 
 @media (max-width: 1000px) {
-  .home-kpis {
+  .home-kpis,
+  #order-kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vendor-update-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .vf-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .order-pager {
+    align-items: flex-start;
+  }
+
+  .pager-buttons {
+    justify-content: flex-start;
   }
 }
