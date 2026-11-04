@@ -67,7 +67,6 @@
   ];
 
   const VENDOR_UPDATE_STORAGE_KEY = 'ariel.vendorUpdates.v1';
-  const ORDER_LINE_PAGE_SIZE = 25;
 
   const RECEIPT_STATUSES = [
     'Received',
@@ -98,6 +97,11 @@
     booked: { label: 'Booked', variant: 'wn' },
     shipped: { label: 'Shipped', variant: 'info' },
     arrived: { label: 'Arrived', variant: 'ok' },
+  };
+
+  const WAREHOUSE_LABELS = {
+    '1': 'WC',
+    '3': '1825',
   };
 
   /* =========================================================================
@@ -312,11 +316,8 @@
     searchQuery: '',
     statusFilter: '',
     orderBucketFilter: '',
-    sortBy: 'eta',
-    sortDir: 'asc',
     orderPage: 1,
     orderPageSize: 50,
-    orderLinePages: {},
     includeHeaderOnly: false,
     portFilter: '',
     expandedOrders: new Set(),
@@ -333,6 +334,9 @@
     importPreview: null,
     importPreviews: {},
     reminders: [],
+    followUpOpenCategories: new Set(['unplanned']),
+    followUpOpenVendors: new Set(),
+    followUpReminderDraft: null,
 
     vendorUpdates: [],
     vendorUpdateSequence: 0,
@@ -655,36 +659,19 @@
       if (query && !poSearchText(po).includes(query)) return;
 
       const summary = getPoSummary(po);
-      if (status === 'All open' && summary.balance <= 0) return;
-      if (status && status !== 'All open' && summary.status !== status) return;
+      if (status && summary.status !== status) return;
       if (bucket === 'Open POs' && summary.balance <= 0) return;
       if (bucket && bucket !== 'Open POs' && orderCoverageBucket(po, summary) !== bucket) return;
       rows.push({ po, summary });
     });
 
-    const dir = state.sortDir === 'desc' ? -1 : 1;
-
     rows.sort((a, b) => {
-      if (state.sortBy === 'eta') {
-        const aEta = a.summary.nextEta;
-        const bEta = b.summary.nextEta;
-        if (aEta && !bEta) return 1;
-        if (!aEta && bEta) return -1;
-        if (aEta && bEta && aEta !== bEta) return aEta.localeCompare(bEta) * dir;
-        return a.po.po.localeCompare(b.po.po);
-      }
-      if (state.sortBy === 'age') {
-        const aAge = a.summary.ageDays;
-        const bAge = b.summary.ageDays;
-        if (aAge == null && bAge == null) return a.po.po.localeCompare(b.po.po);
-        if (aAge == null) return 1;
-        if (bAge == null) return -1;
-        return (aAge - bAge) * dir || a.po.po.localeCompare(b.po.po);
-      }
-      if (state.sortBy === 'value') {
-        return (a.summary.openValue - b.summary.openValue) * dir || a.po.po.localeCompare(b.po.po);
-      }
-      return (a.po.vendorId.localeCompare(b.po.vendorId) * dir) || a.po.po.localeCompare(b.po.po);
+      const aEta = a.summary.nextEta;
+      const bEta = b.summary.nextEta;
+      if (aEta && !bEta) return 1;
+      if (!aEta && bEta) return -1;
+      if (aEta && bEta && aEta !== bEta) return aEta.localeCompare(bEta);
+      return a.po.po.localeCompare(b.po.po);
     });
 
     return rows;
@@ -743,11 +730,19 @@
   }
 
   function renderWarehouse(receipt) {
-    if (receipt.warehouse) {
-      return { label: receipt.warehouse, title: 'WHLocation from export' };
+    const raw = String(receipt.warehouse || '').trim();
+    if (raw) {
+      const key = raw.replace(/^(\d+)\.0+$/, '$1');
+      const label = WAREHOUSE_LABELS[key] || raw;
+      return {
+        label,
+        title: label === raw
+          ? 'WHLocation from export'
+          : `WHLocation ${raw} from export (shown as ${label})`,
+      };
     }
     if (receipt.tracking && /-W$/i.test(receipt.tracking)) {
-      return { label: '3 (likely)', title: 'Inferred from the -W tracking suffix; WHLocation is blank' };
+      return { label: '1825 (likely)', title: 'Inferred from the -W tracking suffix; WHLocation is blank' };
     }
     return { label: '—', title: 'WHLocation is blank' };
   }
@@ -1127,7 +1122,7 @@
     return `
       ${renderHeader(
         'Vendor updates',
-        `Capture shipment and other details supplied by vendors. The “+ Log vendor update” button is available from every page.`,
+        'Capture shipment and other details supplied by vendors.',
         `<div class="sub">${formatNumber(state.vendorUpdates.length)} saved · browser-local</div>`
       )}
 
@@ -1350,14 +1345,28 @@
      7. Purchase orders
      ========================================================================= */
 
+  function orderStatusLabel(status) {
+    return status === 'Overdue' ? 'Past ETA' : status;
+  }
+
+  function availableOrderStatuses() {
+    const present = new Set(filteredOrders({ status: '' }).map(({ summary }) => summary.status));
+    if (state.statusFilter && !present.has(state.statusFilter)) state.statusFilter = '';
+    return PO_STATUSES.filter((status) => present.has(status));
+  }
+
+  function orderStatusOptionsMarkup(statuses) {
+    return `<option value="">All statuses</option>${statuses
+      .map((status) => `<option value="${attr(status)}"${state.statusFilter === status ? ' selected' : ''}>${esc(orderStatusLabel(status))}</option>`)
+      .join('')}`;
+  }
+
   function renderOrders() {
     const portOptions = (DATA.ports || [])
       .map((port) => `<option value="${attr(port)}"${state.portFilter === port ? ' selected' : ''}>${esc(port)}</option>`)
       .join('');
 
-    const statusOptions = ['All open', ...PO_STATUSES]
-      .map((status) => `<option value="${attr(status)}"${state.statusFilter === status ? ' selected' : ''}>${esc(status === 'Overdue' ? 'Past ETA' : status)}</option>`)
-      .join('');
+    const statusOptions = orderStatusOptionsMarkup(availableOrderStatuses());
 
     return `
       ${renderHeader(
@@ -1366,8 +1375,6 @@
         `<div class="sub">${formatNumber(HEALTH.counts.posWithLines)} POs with lines in export · ${SEGMENT_LABELS[state.segmentFilter] || 'All segments'}</div>`
       )}
 
-      <div class="grid" id="order-kpis"></div>
-
       <div class="card row" style="justify-content:flex-start">
         <input
           type="search"
@@ -1375,21 +1382,11 @@
           placeholder="Search PO, vendor, item or description"
           value="${attr(state.searchQuery)}"
         >
-        <select id="order-status">
-          <option value="">All statuses</option>
-          ${statusOptions}
-        </select>
+        <select id="order-status">${statusOptions}</select>
         <select id="order-port">
           <option value="">All ports</option>
           ${portOptions}
         </select>
-        <select id="order-sort">
-          <option value="eta"${state.sortBy === 'eta' ? ' selected' : ''}>Sort: ETA</option>
-          <option value="age"${state.sortBy === 'age' ? ' selected' : ''}>Sort: PO age</option>
-          <option value="value"${state.sortBy === 'value' ? ' selected' : ''}>Sort: open value</option>
-          <option value="vendor"${state.sortBy === 'vendor' ? ' selected' : ''}>Sort: vendor</option>
-        </select>
-        <button class="s" data-action="sort-dir" title="Toggle sort direction">${state.sortDir === 'desc' ? '↓ Desc' : '↑ Asc'}</button>
         <select id="order-page-size">
           <option value="25"${state.orderPageSize === 25 ? ' selected' : ''}>25 / page</option>
           <option value="50"${state.orderPageSize === 50 ? ' selected' : ''}>50 / page</option>
@@ -1399,82 +1396,14 @@
           <input type="checkbox" id="include-header-only"${state.includeHeaderOnly ? ' checked' : ''}>
           Include header-only POs (${formatNumber(HEALTH.counts.headerOnlyPos)})
         </label>
+        ${state.orderBucketFilter ? `
+          <span class="row" style="gap:6px">
+            <span class="tag info">${esc(state.orderBucketFilter)} filter</span>
+            <button class="s" data-action="clear-order-bucket">Clear</button>
+          </span>` : ''}
       </div>
 
       <div class="card" id="order-table"></div>`;
-  }
-
-  function renderOrderKpis() {
-    const host = document.getElementById('order-kpis');
-    if (!host) return;
-
-    // Counts ignore the status and bucket filters so the cards stay usable while one is active.
-    const rows = filteredOrders({ status: '', bucket: '' });
-    const counts = {
-      'Open POs': 0,
-      'In transit': 0,
-      'At risk': 0,
-      'Not yet planned': 0,
-    };
-    let openValue = 0;
-
-    rows.forEach(({ po, summary }) => {
-      const bucket = orderCoverageBucket(po, summary);
-      if (summary.balance > 0) {
-        counts['Open POs'] += 1;
-        openValue += summary.openValue;
-      }
-      if (bucket === 'In transit') counts['In transit'] += 1;
-      else if (bucket === 'At risk') counts['At risk'] += 1;
-      else if (bucket === 'Not yet planned') counts['Not yet planned'] += 1;
-    });
-
-    const notYetPct = counts['Open POs']
-      ? Math.round((counts['Not yet planned'] / counts['Open POs']) * 100)
-      : 0;
-    const cards = [
-      {
-        key: 'Open POs',
-        note: `$${formatValue(openValue)} open value`,
-        hot: false,
-        title: 'Show all POs with an open balance',
-      },
-      {
-        key: 'In transit',
-        note: 'Open receipts or shipped containers',
-        hot: false,
-        title: 'Show POs with an open receipt or shipped units',
-      },
-      {
-        key: 'At risk',
-        note: 'No open receipt · unplanned balance',
-        hot: counts['At risk'] > 0,
-        title: 'Show POs with an unplanned balance and no open receipt',
-      },
-      {
-        key: 'Not yet planned',
-        note: `${notYetPct}% of open POs`,
-        hot: false,
-        title: 'Show open POs whose balance is not yet planned or in transit',
-        neutral: true,
-      },
-    ];
-
-    host.innerHTML = cards.map((card) => {
-      const selected = card.key === 'Open POs'
-        ? state.orderBucketFilter === 'Open POs' || state.statusFilter === 'All open'
-        : state.orderBucketFilter === card.key;
-      return `
-        <button
-          class="card kp${card.hot ? ' hot' : ''}${card.neutral ? ' neutral' : ''}${selected ? ' sel' : ''}"
-          data-action="bucket:${attr(card.key)}"
-          title="${attr(card.title)}"
-        >
-          <b>${formatNumber(counts[card.key])}</b>
-          <span class="sub">${esc(card.key)}</span>
-          <span class="sub">${esc(card.note)}</span>
-        </button>`;
-    }).join('');
   }
 
   function paginationButtons(pages, current, action = 'page') {
@@ -1520,9 +1449,12 @@
       ? { top: scrollHost.scrollTop, left: scrollHost.scrollLeft }
       : null;
 
-    renderOrderKpis();
-    const sortDirButton = document.querySelector('[data-action="sort-dir"]');
-    if (sortDirButton) sortDirButton.textContent = state.sortDir === 'desc' ? '↓ Desc' : '↑ Asc';
+    const statusSelect = document.getElementById('order-status');
+    if (statusSelect) {
+      const statuses = availableOrderStatuses();
+      statusSelect.innerHTML = orderStatusOptionsMarkup(statuses);
+      statusSelect.value = state.statusFilter;
+    }
 
     const rows = filteredOrders();
     const pageSize = state.orderPageSize;
@@ -1555,8 +1487,7 @@
             ${pageRows.map(({ po, summary }) => renderOrderRow(po, summary)).join('')}
           </tbody>
         </table>
-      </div>
-      ${orderPager(rows, start, pageSize, pages, 'bottom')}` : `
+      </div>` : `
       <div class="row" style="margin-bottom:8px">
         <span class="sub">0 POs</span>
         <span class="sub">Page 1 of 1</span>
@@ -1633,22 +1564,12 @@
         <div class="sub">${esc(label)}</div>
         <div>${esc(value)}</div>
       </div>`).join('');
-    const vendorUpdates = state.vendorUpdates.filter((update) => update.po === po.po);
-    const linePageSize = ORDER_LINE_PAGE_SIZE;
-    const linePages = Math.max(1, Math.ceil(po.lines.length / linePageSize));
-    const linePage = Math.min(Math.max(1, state.orderLinePages[po.po] || 1), linePages);
-    const lineStart = (linePage - 1) * linePageSize;
-    const pageLines = po.lines.slice(lineStart, lineStart + linePageSize);
+    const hasOpenReceipt = poHasOpenReceipt(po);
 
     return `
       <div class="detail">
         ${po.synthetic ? `<div class="note bad-note">PO header missing in PurchPO. Vendor “${esc(po.vendorId || 'unknown')}” was inferred from the PO number; treat these values as incomplete.</div>` : ''}
         <div class="detail-grid">${headerGrid}</div>
-
-        <div class="row" style="justify-content:flex-start; margin:10px 0">
-          <button class="s" data-action="vendor-update:${attr(po.po)}">+ Log vendor update</button>
-          <span class="sub">${vendorUpdates.length ? `${formatNumber(vendorUpdates.length)} vendor update${vendorUpdates.length === 1 ? '' : 's'} logged for this PO.` : 'No vendor updates logged for this PO.'}</span>
-        </div>
 
         <h3>Shipments</h3>
         ${po.receipts.length ? `
@@ -1690,10 +1611,10 @@
           <div class="sub">
             Received is derived from ordered minus PO balance in this export. Planned is assigned to a draft or booked container. “In container” is on a container marked Shipped. “In transit” also includes open receipts.
           </div>
-          ${po.lines.length ? `<span class="sub">${formatNumber(po.lines.length)} lines · showing ${formatNumber(lineStart + 1)}–${formatNumber(Math.min(po.lines.length, lineStart + linePageSize))}</span>` : ''}
+          ${po.lines.length ? `<span class="sub">${formatNumber(po.lines.length)} lines · all shown; scroll the line table to review.</span>` : ''}
         </div>
         ${po.lines.length ? `
-          <div class="sc detail-lines-scroll">
+          <div class="sc detail-lines-scroll" tabindex="0" aria-label="Line items for PO ${attr(po.po)}">
             <table class="compact-table detail-lines-table">
               <thead>
                 <tr>
@@ -1711,14 +1632,13 @@
                 </tr>
               </thead>
               <tbody>
-                ${pageLines.map((line) => {
+                ${po.lines.map((line) => {
                   const effective = effectiveBalance(line);
                   const status = lineStatus(line);
                   const open = openUnitsForLine(line);
                   const shipped = shippedUnitsForLine(line);
                   const planned = Math.max(0, Math.min(plannedUnitsForLine(line), open - shipped));
                   const unplanned = unplannedUnitsForLine(line);
-                  const hasOpenReceipt = poHasOpenReceipt(po);
                   return `
                     <tr>
                       <td class="mono">${esc(line.itemId || '—')}</td>
@@ -1736,18 +1656,7 @@
                 }).join('')}
               </tbody>
             </table>
-          </div>
-          ${linePages > 1 ? `
-            <div class="row order-pager bottom line-pager">
-              <span class="sub">Lines page ${linePage} of ${linePages}</span>
-              <span class="row pager-buttons">
-                <button class="s" data-action="line-page:${attr(po.po)}:1"${linePage <= 1 ? ' disabled' : ''}>« First</button>
-                <button class="s" data-action="line-page:${attr(po.po)}:${linePage - 1}"${linePage <= 1 ? ' disabled' : ''}>‹ Prev</button>
-                ${paginationButtons(linePages, linePage, `line-page:${po.po}`)}
-                <button class="s" data-action="line-page:${attr(po.po)}:${linePage + 1}"${linePage >= linePages ? ' disabled' : ''}>Next ›</button>
-                <button class="s" data-action="line-page:${attr(po.po)}:${linePages}"${linePage >= linePages ? ' disabled' : ''}>Last »</button>
-              </span>
-            </div>` : ''}` : '<div class="sub">This PO has no line items in the detail export.</div>'}
+          </div>` : '<div class="sub">This PO has no line items in the detail export.</div>'}
       </div>`;
   }
 
@@ -1981,7 +1890,7 @@
       <div id="shipment-list"></div>
 
       <div class="card sub">
-        Warehouse “3 (likely)” is inferred from a “-W” tracking suffix when the warehouse field is blank.
+        Warehouse codes from the export: “1” shows as WC and “3” as 1825. Warehouse “1825 (likely)” is inferred from a “-W” tracking suffix when the warehouse field is blank.
         <details class="more"><summary>Why some shipments have no matching PO</summary>
           A receipt can exist without a PO line that matches its invoice and item, or its PO may belong to the Other segment. Click a PO number to open it.
         </details>
@@ -3071,6 +2980,135 @@
     return Array.from(grouped.values()).sort((a, b) => a.vendor.localeCompare(b.vendor));
   }
 
+  const FOLLOW_UP_CATEGORY_LABELS = {
+    unplanned: 'At risk',
+    notYetPlanned: 'Not yet planned',
+    nothing: 'Open balance — already planned',
+    overdue: 'Past ETA',
+    old: 'Not shipped yet and Old',
+    unmatched: 'Receipts unmatched',
+  };
+
+  function followUpVendorKey(categoryKey, vendor) {
+    return `${categoryKey}::${vendor}`;
+  }
+
+  function followUpReferences(categoryKey, vendor) {
+    const buckets = followUpBuckets();
+    if (categoryKey === 'unmatched') {
+      return buckets.unmatched
+        .filter((receipt) => (receipt.vendorId || '(blank)') === vendor)
+        .map((receipt) => receipt.invoiceNo || 'receipt');
+    }
+    return (buckets[categoryKey] || [])
+      .filter(({ po }) => (po.vendorId || '(blank)') === vendor)
+      .map(({ po }) => po.po);
+  }
+
+  function openFollowUpReminder(categoryKey, vendor, count) {
+    const categoryLabel = FOLLOW_UP_CATEGORY_LABELS[categoryKey] || 'Follow-up';
+    const references = followUpReferences(categoryKey, vendor);
+    const shown = references.slice(0, 12);
+    const referenceLine = shown.length
+      ? `${shown.join(', ')}${references.length > shown.length ? ` and ${references.length - shown.length} more` : ''}`
+      : `${count} item${count === 1 ? '' : 's'}`;
+    const subject = `Follow-up required — ${vendor} — ${categoryLabel}`;
+    const body = [
+      `Hi ${vendor} team,`,
+      '',
+      `We are following up on ${count} ${count === 1 ? 'item' : 'items'} in our ${categoryLabel} list.`,
+      '',
+      `References: ${referenceLine}`,
+      '',
+      'Please confirm the latest production and shipment status, including any updated ETD/ETA.',
+      '',
+      'Thank you,',
+      'Ariel Purchasing',
+    ].join('\n');
+
+    state.followUpReminderDraft = { vendor, count, categoryKey, categoryLabel, subject, body };
+
+    const scrollY = window.scrollY;
+    render();
+    window.scrollTo({ top: scrollY });
+  }
+
+  function closeFollowUpReminder() {
+    state.followUpReminderDraft = null;
+    const scrollY = window.scrollY;
+    render();
+    window.scrollTo({ top: scrollY });
+  }
+
+  function sendFollowUpReminder() {
+    const draft = state.followUpReminderDraft;
+    if (!draft) return;
+
+    state.reminders.unshift({
+      vendor: draft.vendor,
+      count: draft.count,
+      channel: 'Email (simulated)',
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
+    state.followUpReminderDraft = null;
+
+    const scrollY = window.scrollY;
+    render();
+    window.scrollTo({ top: scrollY });
+    showToast(`Reminder sent to ${draft.vendor} · ${draft.count} item${draft.count === 1 ? '' : 's'} (simulated).`);
+  }
+
+  function renderFollowUpReminderDialog() {
+    const draft = state.followUpReminderDraft;
+    if (!draft) return '';
+
+    return `
+      <div class="modal-backdrop">
+        <div class="modal-card mail-draft-card" role="dialog" aria-modal="true" aria-labelledby="followup-draft-title">
+          <div>
+            <h2 id="followup-draft-title">Draft reminder</h2>
+            <div class="sub">${esc(draft.vendor)} · ${formatNumber(draft.count)} item${draft.count === 1 ? '' : 's'}</div>
+          </div>
+          <div class="mail-draft-meta">
+            <div><div class="sub">To</div><div><b>${esc(draft.vendor)}</b> purchasing contact</div></div>
+            <div><div class="sub">Category</div><div>${esc(draft.categoryLabel)}</div></div>
+          </div>
+          <label class="field-label" for="followup-draft-subject">Subject</label>
+          <input id="followup-draft-subject" class="mail-draft-subject" type="text" readonly value="${attr(draft.subject)}">
+          <label class="field-label" for="followup-draft-body">Message</label>
+          <textarea id="followup-draft-body" class="mail-draft-body" readonly rows="9">${esc(draft.body)}</textarea>
+          <div class="sub">Sending is simulated in this prototype; no email is actually sent.</div>
+          <div class="modal-actions">
+            <button class="s" data-action="close-followup-draft">Cancel</button>
+            <button class="p" data-action="send-followup-draft">Send</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderFollowUpIndex(categories) {
+    return `
+      <div class="card">
+        <div class="row">
+          <div>
+            <h2>Follow-up categories</h2>
+            <div class="sub">Jump to a category, or expand and collapse the sections below.</div>
+          </div>
+          <div class="row">
+            <button class="s" data-action="followup-expand-all">Expand all</button>
+            <button class="s" data-action="followup-collapse-all">Collapse all</button>
+          </div>
+        </div>
+        <div class="followup-index">
+          ${categories.map((category) => `
+            <button class="followup-index-item tone-${category.tone}" data-action="jump-followup:${attr(category.key)}">
+              <b>${formatNumber(category.total)}</b>
+              <span>${esc(category.shortTitle)}</span>
+            </button>`).join('')}
+        </div>
+      </div>`;
+  }
+
   function renderFollowUpPoTable(rows) {
     return `
       <div class="sc">
@@ -3117,19 +3155,25 @@
       </div>`;
   }
 
-  function renderFollowUpCategory(title, description, groups, renderGroup) {
+  function renderFollowUpCategory({ key, title, description, groups, renderGroup, tone }) {
     const total = groups.reduce((sum, group) => sum + group.rows.length, 0);
+    const open = state.followUpOpenCategories.has(key);
     return `
-      <div class="card">
-        <div class="row">
+      <details class="card followup-category tone-${tone}" id="followup-${attr(key)}" data-followup-category="${attr(key)}"${open ? ' open' : ''}>
+        <summary class="followup-category-summary">
           <div>
             <h2>${esc(title)}</h2>
             <div class="sub">${description}</div>
           </div>
-          <span class="sub">${formatNumber(total)} item${total === 1 ? '' : 's'}</span>
+          <div class="followup-category-count">
+            <span class="tag ${tone === 'neutral' ? '' : tone}">${formatNumber(total)} item${total === 1 ? '' : 's'}</span>
+            <span class="sub">${formatNumber(groups.length)} vendor${groups.length === 1 ? '' : 's'}</span>
+          </div>
+        </summary>
+        <div class="followup-category-body">
+          ${groups.length ? groups.map((group) => renderGroup(group, key)).join('') : '<div class="sub" style="margin-top:10px">Nothing in this category.</div>'}
         </div>
-        ${groups.length ? groups.map(renderGroup).join('') : '<div class="sub" style="margin-top:10px">Nothing in this category.</div>'}
-      </div>`;
+      </details>`;
   }
 
   function renderReminderLog() {
@@ -3139,7 +3183,7 @@
         <div class="row">
           <div>
             <h2>Reminder log</h2>
-            <div class="sub">Prototype actions recorded in this browser session. No email is actually sent.</div>
+            <div class="sub">“Send reminder” opens a draft. Clicking Send logs the reminder in this session; no email is actually sent.</div>
           </div>
           <button class="s" data-action="clear-reminders">Clear log</button>
         </div>
@@ -3183,101 +3227,134 @@
     });
     const unmatched = Array.from(unmatchedGroups.values()).sort((a, b) => a.vendor.localeCompare(b.vendor));
 
-    const renderPoGroup = (group) => `
-      <div class="vendor-block">
-        <div class="row">
-          <h3>${esc(group.vendor)} · ${formatNumber(group.rows.length)} PO${group.rows.length === 1 ? '' : 's'}</h3>
-          <button class="s p" data-action="remind:${attr(group.vendor)}:${group.rows.length}">Send reminder</button>
-        </div>
-        ${renderFollowUpPoTable(group.rows)}
-      </div>`;
+    const renderVendorGroup = (categoryKey, group, countLabel, content) => {
+      const vendorKey = followUpVendorKey(categoryKey, group.vendor);
+      const open = state.followUpOpenVendors.has(vendorKey);
+      return `
+        <details class="vendor-block followup-vendor" data-followup-vendor="${attr(vendorKey)}"${open ? ' open' : ''}>
+          <summary class="followup-vendor-summary">
+            <h3><span class="vendor-pill">${esc(group.vendor)}</span> <span class="sub">${countLabel}</span></h3>
+          </summary>
+          <div class="followup-vendor-body">
+            <div class="row followup-vendor-actions">
+              <span class="sub">Draft a follow-up email using these items.</span>
+              <button class="s p" data-action="remind:${attr(categoryKey)}:${attr(group.vendor)}:${group.rows.length}">Send reminder</button>
+            </div>
+            ${content}
+          </div>
+        </details>`;
+    };
 
-    const renderUnmatchedGroup = (group) => `
-      <div class="vendor-block">
-        <div class="row">
-          <h3>${esc(group.vendor)} · ${formatNumber(group.rows.length)} unmatched receipt${group.rows.length === 1 ? '' : 's'}</h3>
-          <button class="s p" data-action="remind:${attr(group.vendor)}:${group.rows.length}">Send reminder</button>
-        </div>
-        <div class="sc">
-          <table>
-            <thead>
+    const renderPoGroup = (group, categoryKey) => renderVendorGroup(
+      categoryKey,
+      group,
+      `${formatNumber(group.rows.length)} PO${group.rows.length === 1 ? '' : 's'}`,
+      renderFollowUpPoTable(group.rows)
+    );
+
+    const renderUnmatchedGroup = (group, categoryKey) => renderVendorGroup(
+      categoryKey,
+      group,
+      `${formatNumber(group.rows.length)} unmatched receipt${group.rows.length === 1 ? '' : 's'}`,
+      `<div class="sc">
+        <table>
+          <thead>
+            <tr>
+              <th>INVOICE</th>
+              <th>ETA</th>
+              <th>RECEIPT DATE</th>
+              <th>TRACKING</th>
+              <th>TYPE</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${group.rows.map((receipt) => `
               <tr>
-                <th>INVOICE</th>
-                <th>ETA</th>
-                <th>RECEIPT DATE</th>
-                <th>TRACKING</th>
-                <th>TYPE</th>
-                <th>STATUS</th>
+                <td class="mono">${esc(receipt.invoiceNo)}</td>
+                <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
+                <td>${renderReceiptReceivedDate(receipt)}</td>
+                <td class="mono">${esc(receipt.tracking || '—')}</td>
+                <td>${esc(receipt.type || '—')}</td>
+                <td>${renderReceiptStatusTag(receipt)}</td>
               </tr>
-            </thead>
-            <tbody>
-              ${group.rows.map((receipt) => `
-                <tr>
-                  <td class="mono">${esc(receipt.invoiceNo)}</td>
-                  <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
-                  <td>${renderReceiptReceivedDate(receipt)}</td>
-                  <td class="mono">${esc(receipt.tracking || '—')}</td>
-                  <td>${esc(receipt.type || '—')}</td>
-                  <td>${renderReceiptStatusTag(receipt)}</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>`;
+            `).join('')}
+          </tbody>
+        </table>
+      </div>`
+    );
 
-    const total = followUpTotal(buckets);
+    const categories = [
+      {
+        key: 'unplanned',
+        shortTitle: 'At risk',
+        title: '1. At risk',
+        description: 'Open balance with no open receipt and unplanned units; the PO is over 90 days old or has a received receipt.',
+        groups: unplannedGroups,
+        renderGroup: renderPoGroup,
+        tone: 'bad',
+      },
+      {
+        key: 'notYetPlanned',
+        shortTitle: 'Not yet planned',
+        title: '2. Not yet planned',
+        description: 'Unplanned open balance on a PO that does not meet the At risk definition.',
+        groups: notYetPlannedGroups,
+        renderGroup: renderPoGroup,
+        tone: 'wn',
+      },
+      {
+        key: 'nothing',
+        shortTitle: 'Already planned',
+        title: '3. Open balance — already planned',
+        description: 'Open balance not yet shipped is assigned to a draft or booked container.',
+        groups: nothingGroups,
+        renderGroup: renderPoGroup,
+        tone: 'info',
+      },
+      {
+        key: 'overdue',
+        shortTitle: 'Past ETA',
+        title: '4. Past ETA',
+        description: 'At least one open receipt has an ETA before the data date.',
+        groups: overdueGroups,
+        renderGroup: renderPoGroup,
+        tone: 'bad',
+      },
+      {
+        key: 'old',
+        shortTitle: 'Old / not shipped',
+        title: '5. Not shipped yet and Old',
+        description: 'No receipt at all and the PO is more than 90 days old.',
+        groups: oldGroups,
+        renderGroup: renderPoGroup,
+        tone: 'wn',
+      },
+      {
+        key: 'unmatched',
+        shortTitle: 'Unmatched receipts',
+        title: '6. Receipts unmatched',
+        description: 'Receipts with no exact or suffix-normalised PO match. They are not forced onto a PO and are shown across all segments because they have no PO/FOB segment.',
+        groups: unmatched,
+        renderGroup: renderUnmatchedGroup,
+        tone: 'neutral',
+      },
+    ];
+    categories.forEach((category) => {
+      category.total = category.groups.reduce((sum, group) => sum + group.rows.length, 0);
+    });
 
     return `
       ${renderHeader(
         'Follow-ups',
-        `${formatNumber(total)} unique items in the current filters. Categories overlap; a PO can appear in more than one lens. Unmatched receipts are shown across all segments. Reminders are prototype actions logged in this session.`,
+        '',
         `<div class="sub">${SEGMENT_LABELS[state.segmentFilter] || 'All segments'}</div>`
       )}
 
       ${renderReminderLog()}
-
-      ${renderFollowUpCategory(
-        '1. At risk',
-        'Open balance with no open receipt and unplanned units; the PO is over 90 days old or has a received receipt.',
-        unplannedGroups,
-        renderPoGroup
-      )}
-
-      ${renderFollowUpCategory(
-        '2. Not yet planned',
-        'Unplanned open balance on a PO that does not meet the At risk definition.',
-        notYetPlannedGroups,
-        renderPoGroup
-      )}
-
-      ${renderFollowUpCategory(
-        '3. Open balance — already planned',
-        'Open balance not yet shipped is assigned to a draft or booked container.',
-        nothingGroups,
-        renderPoGroup
-      )}
-
-      ${renderFollowUpCategory(
-        '4. Past ETA',
-        'At least one open receipt has an ETA before the data date.',
-        overdueGroups,
-        renderPoGroup
-      )}
-
-      ${renderFollowUpCategory(
-        '5. Not shipped yet and Old',
-        'No receipt at all and the PO is more than 90 days old.',
-        oldGroups,
-        renderPoGroup
-      )}
-
-      ${renderFollowUpCategory(
-        '6. Receipts unmatched',
-        'Receipts with no exact or suffix-normalised PO match. They are not forced onto a PO and are shown across all segments because they have no PO/FOB segment.',
-        unmatched,
-        renderUnmatchedGroup
-      )}`;
+      ${renderFollowUpIndex(categories)}
+      ${categories.map((category) => renderFollowUpCategory(category)).join('')}
+      ${renderFollowUpReminderDialog()}`;
   }
 
   /* =========================================================================
@@ -3387,11 +3464,7 @@
 
     if (viewKey === 'orders') {
       updateOrderTable();
-      const statusSelect = document.getElementById('order-status');
-      const sortSelect = document.getElementById('order-sort');
       const portSelect = document.getElementById('order-port');
-      if (statusSelect) statusSelect.value = state.statusFilter;
-      if (sortSelect) sortSelect.value = state.sortBy;
       if (portSelect) portSelect.value = state.portFilter;
     }
 
@@ -3537,24 +3610,11 @@
         updateOrderTable();
         break;
 
-      case 'bucket': {
-        const bucket = args.join(':');
-        state.orderBucketFilter = state.orderBucketFilter === bucket ? '' : bucket;
-        state.statusFilter = '';
+      case 'clear-order-bucket':
+        state.orderBucketFilter = '';
         state.orderPage = 1;
         updateOrderTable();
-        const select = document.getElementById('order-status');
-        if (select) select.value = '';
         break;
-      }
-
-      case 'line-page': {
-        const poNumber = args[0];
-        const page = Number(args[1]) || 1;
-        state.orderLinePages[poNumber] = page;
-        updateOrderTable({ preserveScroll: true });
-        break;
-      }
 
       case 'ship-status': {
         const status = args[0] || '';
@@ -3592,23 +3652,6 @@
       case 'ship-collapse-all':
         state.expandedShipmentGroups.clear();
         updateShipmentList();
-        break;
-
-      case 'status': {
-        const status = args.join(':');
-        state.statusFilter = state.statusFilter === status ? '' : status;
-        state.orderBucketFilter = '';
-        state.orderPage = 1;
-        updateOrderTable();
-        const select = document.getElementById('order-status');
-        if (select) select.value = state.statusFilter;
-        break;
-      }
-
-      case 'sort-dir':
-        state.sortDir = state.sortDir === 'desc' ? 'asc' : 'desc';
-        state.orderPage = 1;
-        updateOrderTable();
         break;
 
       case 'add-container':
@@ -3656,16 +3699,49 @@
         break;
 
       case 'remind': {
-        const vendor = args[0] || 'vendor';
-        const count = Number(args[1]) || 0;
-        state.reminders.unshift({
-          vendor,
-          count,
-          channel: 'Email (mock)',
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        });
+        const categoryKey = args[0] || 'unplanned';
+        const vendor = args[1] || 'vendor';
+        const count = Number(args[2]) || 0;
+        openFollowUpReminder(categoryKey, vendor, count);
+        break;
+      }
+
+      case 'close-followup-draft':
+        closeFollowUpReminder();
+        break;
+
+      case 'send-followup-draft':
+        sendFollowUpReminder();
+        break;
+
+      case 'followup-expand-all':
+        state.followUpOpenCategories = new Set(Object.keys(FOLLOW_UP_CATEGORY_LABELS));
         render();
-        showToast(`Reminder logged for ${vendor} · ${count} item${count === 1 ? '' : 's'} (prototype).`);
+        setTimeout(() => {
+          document.querySelectorAll('.followup-category, .followup-vendor').forEach((element) => {
+            element.open = true;
+          });
+        }, 0);
+        break;
+
+      case 'followup-collapse-all':
+        state.followUpOpenCategories = new Set();
+        render();
+        setTimeout(() => {
+          document.querySelectorAll('.followup-category, .followup-vendor').forEach((element) => {
+            element.open = false;
+          });
+        }, 0);
+        break;
+
+      case 'jump-followup': {
+        const categoryKey = args[0] || 'unplanned';
+        state.followUpOpenCategories.add(categoryKey);
+        render();
+        setTimeout(() => {
+          const section = document.getElementById(`followup-${categoryKey}`);
+          if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 0);
         break;
       }
 
@@ -3705,6 +3781,23 @@
     const [action, ...args] = actionElement.dataset.action.split(':');
     handleAction(action, args);
   });
+
+  document.addEventListener('toggle', (event) => {
+    const category = event.target.closest?.('details[data-followup-category]');
+    if (category) {
+      const key = category.dataset.followupCategory;
+      if (category.open) state.followUpOpenCategories.add(key);
+      else state.followUpOpenCategories.delete(key);
+      return;
+    }
+
+    const vendor = event.target.closest?.('details[data-followup-vendor]');
+    if (vendor) {
+      const key = vendor.dataset.followupVendor;
+      if (vendor.open) state.followUpOpenVendors.add(key);
+      else state.followUpOpenVendors.delete(key);
+    }
+  }, true);
 
   document.addEventListener('submit', (event) => {
     if (event.target.id !== 'vendor-update-form') return;
@@ -3768,6 +3861,12 @@
       return;
     }
 
+    if (state.followUpReminderDraft && event.key === 'Escape') {
+      event.preventDefault();
+      closeFollowUpReminder();
+      return;
+    }
+
     if (!state.plannerPendingAssignment) return;
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -3809,13 +3908,6 @@
       case 'order-status':
         state.statusFilter = event.target.value;
         state.orderBucketFilter = '';
-        state.orderPage = 1;
-        updateOrderTable();
-        break;
-
-      case 'order-sort':
-        state.sortBy = event.target.value;
-        state.sortDir = state.sortBy === 'age' || state.sortBy === 'value' ? 'desc' : 'asc';
         state.orderPage = 1;
         updateOrderTable();
         break;
