@@ -761,6 +761,190 @@ button.s:not(.p):hover {
   align-items: start;
 }
 
+/* The plan workspace fills the viewport, so only the PO list scrolls. */
+@media (min-width: 821px) {
+  body.plan-workspace {
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  body.plan-workspace .app {
+    height: 100%;
+    min-height: 0;
+  }
+
+  body.plan-workspace .wrap {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.plan-workspace main {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.plan-workspace .containers-page.plan-page {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  body.plan-workspace .planner-actions-card {
+    flex: 0 0 auto;
+  }
+
+  body.plan-workspace .planner-cols {
+    flex: 1 1 auto;
+    min-height: 0;
+    align-items: stretch;
+  }
+
+  body.plan-workspace .planner-po-panel {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: sticky;
+    top: calc(var(--app-toolbar-height, 64px) + 12px);
+  }
+
+  body.plan-workspace .planner-cols > .ctns {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 2px;
+  }
+
+  body.plan-workspace .planner-container-card > .zone.container-drop {
+    max-height: none;
+  }
+}
+
+.planner-po-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.planner-po-panel-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.planner-po-panel-head h2 {
+  margin-bottom: 0;
+}
+
+.planner-po-search {
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  font-size: 14px;
+  background: var(--card);
+}
+
+.planner-po-panel > .zone.planner-po-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  margin-top: 0;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.planner-line-card {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.planner-line-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 3px 10px;
+}
+
+.planner-line-field {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+.planner-line-label {
+  color: var(--mut);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.planner-line-head b {
+  color: var(--ink);
+}
+
+.planner-line-head .planner-line-field:first-child b {
+  color: var(--acc-strong);
+  font-size: 13px;
+}
+
+.planner-line-item {
+  margin-top: 4px;
+}
+
+.planner-line-item b {
+  color: var(--acc-strong);
+}
+
+.planner-line-description {
+  margin-top: 2px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.planner-line-description .planner-line-label {
+  margin-right: 3px;
+}
+
+.planner-line-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--line);
+  color: var(--mut);
+  font-size: 11px;
+}
+
+.planner-line-meta > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.planner-line-meta b {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.planner-line-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
 .ctns {
   display: flex;
   flex-direction: column;
@@ -1009,55 +1193,6 @@ button.s:not(.p):hover {
   gap: 14px;
 }
 
-.coverage-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.coverage-summary-grid > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-}
-
-.coverage-summary-grid b {
-  color: var(--ink);
-  font-size: 17px;
-  line-height: 1.2;
-}
-
-.coverage-summary-grid span {
-  color: var(--mut);
-  font-size: 11px;
-}
-
-.coverage-definitions {
-  display: grid;
-  gap: 8px;
-}
-
-.coverage-definition {
-  padding: 10px 12px;
-  border-left: 3px solid var(--acc);
-  border-radius: 8px;
-  background: var(--bg);
-}
-
-.coverage-definition > b {
-  color: var(--acc-strong);
-}
-
-.coverage-definition p {
-  margin: 4px 0 0;
-  line-height: 1.55;
-}
-
 .coverage-segments {
   display: grid;
   gap: 8px;
@@ -1069,8 +1204,12 @@ button.s:not(.p):hover {
 .coverage-segments li {
   display: grid;
   grid-template-columns: 10px minmax(0, 1fr);
-  gap: 8px;
+  gap: 10px;
   align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
 }
 
 .coverage-segments i {
@@ -1080,28 +1219,42 @@ button.s:not(.p):hover {
   border-radius: 3px;
 }
 
-.coverage-segments b {
+.coverage-segment-copy {
+  min-width: 0;
+}
+
+.coverage-segment-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.coverage-segment-title b {
   color: var(--ink);
 }
 
-.coverage-segments strong {
-  margin-left: 4px;
+.coverage-segment-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.coverage-segment-value strong {
   color: var(--acc-strong);
+  font-size: 15px;
+}
+
+.coverage-segment-value span {
+  color: var(--mut);
+  font-size: 12px;
 }
 
 .coverage-segments .sub {
   display: block;
   margin-top: 2px;
   line-height: 1.45;
-}
-
-.coverage-note {
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--wbg);
-  color: var(--wfg);
-  font-size: 12px;
-  line-height: 1.5;
 }
 
 .vendor-toolbar {
@@ -2293,6 +2446,10 @@ details.more summary {
     grid-template-columns: 1fr;
   }
 
+  .planner-po-panel > .zone.planner-po-list {
+    max-height: 60vh;
+  }
+
   .planner-container-card {
     grid-template-columns: 1fr;
     grid-template-areas:
@@ -2343,10 +2500,6 @@ details.more summary {
   .modal-card.coverage-modal {
     max-height: calc(100vh - 16px);
     padding: 14px;
-  }
-
-  .coverage-summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .vendor-toolbar {

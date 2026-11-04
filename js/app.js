@@ -1012,7 +1012,7 @@
           <button class="card kp${totals.atRiskPos > 0 ? ' hot' : ''}" data-action="go:followup">
             <b>${formatNumber(totals.atRiskPos)}</b>
             <span class="sub">At risk</span>
-            <span class="sub">No open receipt · unplanned balance</span>
+            <span class="sub">PO that needs attention</span>
           </button>
           <button class="card kp warn" data-action="containers-plan">
             <span class="kp-flag">Needs planning</span>
@@ -1059,18 +1059,19 @@
             </table>
           </div>
         </section>
-        ${state.coverageModalOpen ? renderCoverageModal({ totals, coverageTotal, coverage, notYetPlannedPct, openValueShort }) : ''}
+        ${state.coverageModalOpen ? renderCoverageModal({ coverageTotal, coverage }) : ''}
       </div>`;
   }
 
-  function renderCoverageModal({ totals, coverageTotal, coverage, notYetPlannedPct, openValueShort }) {
+  function renderCoverageModal({ coverageTotal, coverage }) {
     const notes = {
       Received: 'Every line is received in the export (balance is zero).',
-      'In transit': 'The PO has an open receipt, or some units are already on a shipped container.',
+      'In transit': 'The PO has an open receipt, or some items are already on a shipped container.',
       Planned: 'The remaining balance sits in Draft or Booked containers.',
       'Not yet planned': 'Open balance with no open receipt and no container plan yet. This is the amber planning gap.',
-      'At risk': 'Open balance with no open receipt, no plan, and the PO is over 90 days old or already partly received.',
+      'At risk': 'Open balance with no open receipt and no plan. Needs attention because the PO is old or already partly received.',
     };
+    const pct = (value) => (coverageTotal ? ((value / coverageTotal) * 100).toFixed(1) : '0.0');
 
     return `
       <div class="modal-backdrop coverage-backdrop" data-close-coverage>
@@ -1078,44 +1079,24 @@
           <div class="modal-head">
             <div>
               <h2 id="coverage-modal-title">Order coverage</h2>
-              <div class="sub">How the dashboard splits POs, and what the planning quantities mean.</div>
+              <div class="sub">What each PO status means. Every PO is counted once.</div>
             </div>
             <button type="button" class="s modal-close" data-action="close-coverage" aria-label="Close order coverage">×</button>
-          </div>
-
-          <div class="coverage-summary-grid">
-            <div><b>${formatNumber(coverageTotal)}</b><span>POs in view</span></div>
-            <div><b>${formatNumber(totals.openPos)}</b><span>Open POs</span></div>
-            <div><b>${esc(openValueShort)}</b><span>Open value</span></div>
-            <div><b>${notYetPlannedPct}%</b><span>Open POs not planned</span></div>
-          </div>
-
-          <div class="coverage-definitions">
-            <div class="coverage-definition">
-              <b>Ordered, received and remaining</b>
-              <p><b>Ordered</b> is the quantity on the PO lines. <b>Received</b> is ordered minus the PO balance in the export, clamped to the ordered quantity. <b>Remaining / open</b> is the balance still outstanding; a PO is open while that balance is greater than zero.</p>
-            </div>
-            <div class="coverage-definition">
-              <b>Coverage status</b>
-              <p>Each PO is counted once, so the five segments add up to the POs in view. At risk takes precedence when an unplanned open balance has no open receipt and the PO is old or already partly received. In transit covers open receipts or shipped units. Planned means the remaining balance is assigned to Draft or Booked containers. All other open POs are Not yet planned.</p>
-            </div>
-            <div class="coverage-definition">
-              <b>Planned vs unplanned units</b>
-              <p><b>Planned</b> units are open units assigned to Draft or Booked containers. <b>Shipped</b> units are on containers marked Shipped. <b>Unplanned</b> is open units minus planned and shipped units; it is the part of the open balance Ariel still needs to plan.</p>
-            </div>
           </div>
 
           <ul class="coverage-segments">
             ${coverage.map(([label, value, colour]) => `
               <li>
                 <i style="background:${colour}" aria-hidden="true"></i>
-                <span><b>${esc(label)}</b> <strong>${formatNumber(value)}</strong><span class="sub">${notes[label]}</span></span>
+                <div class="coverage-segment-copy">
+                  <div class="coverage-segment-title">
+                    <b>${esc(label)}</b>
+                    <span class="coverage-segment-value"><strong>${formatNumber(value)}</strong><span>${pct(value)}%</span></span>
+                  </div>
+                  <span class="sub">${notes[label]}</span>
+                </div>
               </li>`).join('')}
           </ul>
-
-          <div class="coverage-note">
-            <b>Open POs</b> = In transit + Planned + Not yet planned + At risk. Received POs are not open. The amber KPI counts the Not yet planned segment; it does not add to it.
-          </div>
 
           <div class="modal-actions">
             <button type="button" class="p" data-action="close-coverage">Close</button>
@@ -1419,7 +1400,7 @@
     if (!po.lines.length) tags.push(renderTag('', 'No line items'));
     if (po.synthetic) tags.push(renderTag('bad', 'PO header missing', 'This detail PO has no row in PurchPO. Vendor was inferred from the PO number.'));
     if (summary.old) tags.push(renderTag('wn', 'Old', 'Not shipped yet and PO age is over 90 days'));
-    if (shipped > 0) tags.push(renderTag('info', 'In container', 'Some or all open units are on a container marked Shipped.'));
+    if (shipped > 0) tags.push(renderTag('info', 'In container', 'Some or all open items are on a container marked Shipped.'));
     if (summary.balance > 0 && !hasOpenReceipt && unplanned > 0 && poIsAtRisk(po, summary)) {
       tags.push(renderTag('bad', 'At risk', 'Unplanned open balance on a PO over 90 days old or with a received receipt.'));
     } else if (summary.balance > 0 && !hasOpenReceipt && unplanned > 0) {
@@ -1609,6 +1590,7 @@
       item.po.po,
       item.po.vendorId,
       item.line.itemId,
+      item.line.description,
     ].join(' ').toLowerCase().includes(query));
   }
 
@@ -1842,14 +1824,14 @@
       container.id,
       'shipped',
       'Shipment marked as shipped',
-      [`${formatNumber(units)} units`, container.port].filter(Boolean).join(' · ')
+      [`${formatNumber(units)} items`, container.port].filter(Boolean).join(' · ')
     );
     syncPlannerAssigned();
     clearSummaryCache();
     persistDemoState();
     render();
     showToast(
-      `${container.name} marked shipped - ${formatNumber(units)} units moved to In transit` +
+      `${container.name} marked shipped - ${formatNumber(units)} items moved to In transit` +
       `${container.sailingDate ? ` (sailing ${formatDate(container.sailingDate)})` : ''}.`
     );
   }
@@ -1863,7 +1845,7 @@
       return;
     }
     if (!container.assignments.length) {
-      showToast('This container has no blocked units to receive.');
+      showToast('This container has no blocked items to receive.');
       return;
     }
     const units = containerUnits(container);
@@ -1879,7 +1861,7 @@
       'arrived',
       'Container arrived',
       [
-        `${formatNumber(units)} units received`,
+        `${formatNumber(units)} items received`,
         arrivalDetails.warehouse || '',
         container.port || '',
       ].filter(Boolean).join(' · ')
@@ -1889,7 +1871,7 @@
     persistDemoState();
     render();
     showToast(
-      `${container.name} marked arrived — ${formatNumber(units)} units added to received balances.`
+      `${container.name} marked arrived — ${formatNumber(units)} items added to received balances.`
     );
   }
 
@@ -1987,7 +1969,7 @@
       showToast(
         cbmLimited
           ? `Not enough CBM left in ${container.id} for this block.`
-          : `Quantity must be at least one full carton (${formatNumber(carton)} units).`
+          : `Quantity must be at least one full carton (${formatNumber(carton)} items).`
       );
       return false;
     }
@@ -2027,49 +2009,62 @@
     state.plannerSelectedLineId = null;
     state.plannerPendingAssignment = null;
     render();
-    showToast(`${formatNumber(units)} units of ${line.itemId} planned into ${container.name || container.id} as block B${blockNumber}${cbm == null ? ' — CBM missing' : ''}.`);
+    showToast(`${formatNumber(units)} items of ${line.itemId} planned into ${container.name || container.id} as block B${blockNumber}${cbm == null ? ' — CBM missing' : ''}.`);
     return true;
   }
 
   function renderPlannerLine(item) {
-    const { line, remaining } = item;
+    const { line, po, remaining } = item;
     const carton = line.boxQty > 0 ? line.boxQty : 1;
+    const cartons = Math.floor(remaining / carton);
     const cbm = line.cbm > 0 && line.ordered > 0 ? line.cbm * (remaining / line.ordered) : null;
     const selected = Number(state.plannerSelectedLineId) === line.id;
     const tags = [];
 
     if (line.cbm <= 0) tags.push(renderTag('bad', 'CBM missing', 'This line cannot be counted in the container fill.'));
-    if (line.boxQty <= 0) tags.push(renderTag('wn', 'Box qty missing', 'Carton snapping falls back to one unit.'));
+    if (line.boxQty <= 0) tags.push(renderTag('wn', 'Box qty missing', 'Carton snapping falls back to one item.'));
     if (line.boxQty > 0 && remaining < carton) tags.push(renderTag('wn', 'Final partial carton', 'The remaining balance is smaller than one carton; it can be planned as a partial block.'));
     if (line.isCheckData) tags.push(renderTag('bad', 'Check data'));
 
     return `
       <div
-        class="blk${selected ? ' sel' : ''}"
+        class="blk planner-line-card${selected ? ' sel' : ''}"
         draggable="true"
         data-planner-line="${line.id}"
+        data-po="${attr(po.po)}"
+        data-vendor="${attr(po.vendorId || '')}"
         title="Drag into a container, or tap to select then tap a container"
       >
-        <b class="mono">${esc(line.itemId || '—')}</b> · ${esc(line.description || '—')}
-        <div class="sub">
-          ${formatNumber(remaining)} u remaining · ${formatNumber(Math.floor(remaining / carton))} carton${Math.floor(remaining / carton) === 1 ? '' : 's'} ·
-          ${cbm == null ? 'CBM missing' : formatCbm(cbm)}
+        <div class="planner-line-head">
+          <div class="planner-line-field">
+            <span class="planner-line-label">PO:</span>
+            <b class="mono">${esc(po.po || '—')}</b>
+          </div>
+          <div class="planner-line-field">
+            <span class="planner-line-label">Vendor:</span>
+            <b class="mono">${esc(po.vendorId || '—')}</b>
+          </div>
         </div>
-        ${tags.length ? `<div>${tags.join(' ')}</div>` : ''}
+        <div class="planner-line-field planner-line-item">
+          <span class="planner-line-label">Item ID:</span>
+          <b class="mono">${esc(line.itemId || '—')}</b>
+        </div>
+        <div class="planner-line-description">
+          <span class="planner-line-label">Description:</span>
+          <span>${esc(line.description || '—')}</span>
+        </div>
+        <div class="planner-line-meta">
+          <span><span class="planner-line-label">Remaining quantity:</span> <b>${formatNumber(remaining)} items</b></span>
+          <span><span class="planner-line-label">Cartons:</span> <b>${formatNumber(cartons)}</b></span>
+          <span><span class="planner-line-label">CBM:</span> <b>${cbm == null ? 'Missing' : cbm.toFixed(2)}</b></span>
+        </div>
+        ${tags.length ? `<div class="planner-line-tags">${tags.join(' ')}</div>` : ''}
       </div>`;
   }
 
   function renderPlannerLineGroups(items) {
-    const byPo = new Map();
-    items.forEach((item) => {
-      if (!byPo.has(item.po.po)) byPo.set(item.po.po, { po: item.po, items: [] });
-      byPo.get(item.po.po).items.push(item);
-    });
-
-    return Array.from(byPo.values()).map((group) => `
-      <div class="gh">${esc(group.po.po)} · ${esc(group.po.vendorId || '—')}</div>
-      ${group.items.map(renderPlannerLine).join('')}
-    `).join('') || `<div class="sub">${state.plannerLineQuery ? 'No import lines match this search.' : 'No open Import balances without an open receipt in this filter.'}</div>`;
+    return items.map(renderPlannerLine).join('')
+      || `<div class="sub">${state.plannerLineQuery ? 'No import lines match this search.' : 'No open Import balances without an open receipt in this filter.'}</div>`;
   }
 
   function updatePlannerLines() {
@@ -2104,8 +2099,8 @@
           <div class="assignment-summary">
             <b class="mono">${esc(line.itemId || '—')}</b> · ${esc(line.description || '—')}
             <div class="sub">
-              ${line.poRef ? `${esc(line.poRef.po)} · ` : ''}${formatNumber(remaining)} units available ·
-              carton size ${formatNumber(carton)}
+              ${line.poRef ? `${esc(line.poRef.po)} · ` : ''}${formatNumber(remaining)} items available ·
+              ${formatNumber(carton)} items per carton
             </div>
           </div>
           <label class="field-label" for="planner-assignment-qty">Quantity to add</label>
@@ -2999,15 +2994,15 @@
           </div>
           <div class="container-actions">
             <button class="s" data-action="open-container:${attr(container.id)}">Open</button>
-            ${statusKey === 'draft' ? `<button class="s" data-action="book-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Mark this container as booked. Units stay planned.">Mark booked</button>` : ''}
-            ${statusKey === 'draft' || statusKey === 'booked' ? `<button class="p" data-action="ship-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Move this container's planned units into In transit.">Mark as shipped</button>` : ''}
-            ${statusKey === 'shipped' ? `<button class="p" data-action="arrive-container:${attr(container.id)}" title="Add this container's units to received balances in this session.">Mark arrived</button>` : ''}
+            ${statusKey === 'draft' ? `<button class="s" data-action="book-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Mark this container as booked. Items stay planned.">Mark booked</button>` : ''}
+            ${statusKey === 'draft' || statusKey === 'booked' ? `<button class="p" data-action="ship-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Move this container's planned items into In transit.">Mark as shipped</button>` : ''}
+            ${statusKey === 'shipped' ? `<button class="p" data-action="arrive-container:${attr(container.id)}" title="Add this container's items to received balances in this session.">Mark arrived</button>` : ''}
             ${editable ? `<button class="s" data-action="remove-container:${attr(container.id)}" title="Remove this draft or booked container.">Remove</button>` : ''}
           </div>
         </div>
         <div class="planner-container-side">
           <div class="container-summary">
-            <span class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</span>
+            <span class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} items</span>
             <div class="container-meta">
               <label>
                 <span class="field-label">Sailing</span>
@@ -3035,7 +3030,7 @@
               <div class="blk l2">
                 ${renderTag('', block)} <b class="mono">${esc(line ? line.itemId : '—')}</b>
                 ${line && line.poRef ? `<span class="sub">· ${esc(line.poRef.po)}</span>` : ''}
-                · ${formatNumber(assignment.units)} u
+                · ${formatNumber(assignment.units)} items
                 · ${assignment.cbm == null ? 'CBM missing' : formatCbm(assignment.cbm)}
                 ${editable ? `<button class="s" data-action="unassign:${attr(container.id)}:${assignment.lineId}:${index}">Remove</button>` : ''}
               </div>`;
@@ -3060,7 +3055,7 @@
     const remainingUnits = allItems.reduce((sum, item) => sum + item.remaining, 0);
 
     return `
-      <div class="card row" style="justify-content:flex-start">
+      <div class="card row planner-actions-card" style="justify-content:flex-start">
         <input
           id="planner-container-type"
           class="planner-container-input"
@@ -3073,22 +3068,25 @@
         <button class="p" data-action="add-container">Add container</button>
         ${containers.length ? `<button class="s" data-action="clear-plan" title="Removes draft and booked containers only. Shipped and arrived containers stay.">Clear draft/booked</button>` : ''}
         <span class="sub">${formatNumber(allItems.length)} open line${allItems.length === 1 ? '' : 's'}</span>
-        <span class="sub">${formatNumber(plannedUnits)} units planned · ${formatNumber(remainingUnits)} unplanned</span>
+        <span class="sub">${formatNumber(plannedUnits)} items planned · ${formatNumber(remainingUnits)} items unplanned</span>
         ${missingCbmAssignments ? renderTag('bad', `${missingCbmAssignments} assigned line${missingCbmAssignments === 1 ? '' : 's'} with CBM missing`, 'The fill bar excludes CBM-missing assignments.') : ''}
       </div>
 
-      <div class="cols">
-        <div class="card">
-          <h2>Not yet planned and At risk import lines (<span id="planner-lines-count">${formatNumber(items.length)}</span>)</h2>
-          <div class="row" style="justify-content:flex-start; margin-bottom:8px">
+      <div class="cols planner-cols">
+        <div class="card planner-po-panel">
+          <div class="planner-po-panel-head">
+            <h2>Not yet planned and At risk import lines (<span id="planner-lines-count">${formatNumber(items.length)}</span>)</h2>
             <input
+              class="planner-po-search"
               type="search"
               id="planner-line-search"
-              placeholder="Search vendor, PO or item ID"
+              placeholder="Search PO, vendor, item ID or description..."
+              aria-label="Search PO, vendor, item ID or description"
+              autocomplete="off"
               value="${attr(state.plannerLineQuery)}"
             >
           </div>
-          <div class="zone big" id="planner-lines-zone" data-planner-zone="">
+          <div class="zone big planner-po-list" id="planner-lines-zone" data-planner-zone="">
             ${renderPlannerLineGroups(items)}
           </div>
         </div>
@@ -3108,7 +3106,7 @@
                     aria-selected="${active ? 'true' : 'false'}"
                   >
                     <b>${esc(container.name)}</b>
-                    <span class="sub">${esc(container.type)} · ${esc(status.label)} · ${formatNumber(containerUnits(container))} u · ${fill.toFixed(0)}% full</span>
+                    <span class="sub">${esc(container.type)} · ${esc(status.label)} · ${formatNumber(containerUnits(container))} items · ${fill.toFixed(0)}% full</span>
                   </button>`;
               }).join('')}
             </div>
@@ -3216,7 +3214,7 @@
           <button class="ship-group-open" data-action="open-container:${attr(container.id)}">
             <span class="ship-group-name">
               <b>${esc(container.name)}</b>
-              <span class="sub">${esc(container.type)} · ${formatNumber(vendors.length)} vendor${vendors.length === 1 ? '' : 's'} · ${formatNumber(pos.length)} PO${pos.length === 1 ? '' : 's'} · ${formatNumber(containerUnits(container))} units</span>
+              <span class="sub">${esc(container.type)} · ${formatNumber(vendors.length)} vendor${vendors.length === 1 ? '' : 's'} · ${formatNumber(pos.length)} PO${pos.length === 1 ? '' : 's'} · ${formatNumber(containerUnits(container))} items</span>
             </span>
             <span class="ship-group-eta">${eta ? formatDate(eta) : 'No ETA'}</span>
             ${renderTag(status.variant, status.label)}
@@ -3383,6 +3381,7 @@
         ? renderContainerDetail(record)
         : `<section class="container-detail"><div class="container-detail-mobile-bar"><button class="s" data-action="close-container">← Back to containers</button></div><div class="card">Container “${esc(detailId)}” was not found. <button class="s" data-action="close-container">Back to containers</button></div></section>`)
       : '';
+    const planPage = !detailId && state.containersView === 'plan';
 
     let body;
     if (state.containersView === 'plan') body = renderContainersPlan();
@@ -3395,7 +3394,7 @@
         `<div class="row"><span class="sub">Browser-local demo data</span><button class="s" data-action="reset-demo">Reset demo data</button></div>`
       )}
       ${renderContainerSegmentedControl()}
-      <div class="containers-page${detailId ? ' has-detail' : ''}">
+      <div class="containers-page${detailId ? ' has-detail' : ''}${planPage ? ' plan-page' : ''}">
         ${body}
         ${renderLegacyVendorUpdates()}
       </div>
@@ -3420,7 +3419,7 @@
       container.id,
       'shipped',
       'Shipment marked as shipped',
-      `${formatNumber(containerUnits(container))} units · shipped as planned`
+      `${formatNumber(containerUnits(container))} items · shipped as planned`
     );
     state.shippingLineEdit = '';
     syncPlannerAssigned();
@@ -3676,7 +3675,7 @@
         ${blocks.length ? `
           <div class="sc">
             <table class="compact-table">
-              <thead><tr><th>CONTAINER</th><th>TYPE</th><th>BLOCKS</th><th class="n">UNITS</th><th>STATUS</th></tr></thead>
+              <thead><tr><th>CONTAINER</th><th>TYPE</th><th>BLOCKS</th><th class="n">ITEMS</th><th>STATUS</th></tr></thead>
               <tbody>
                 ${blocks.map(({ container, assignments }) => {
                   const statusKey = containerStatusKey(container);
@@ -3903,7 +3902,7 @@
               <th class="n">OPEN VALUE</th>
               <th class="n">BALANCE</th>
               <th class="n">PLANNED</th>
-              <th class="n">UNPLANNED UNITS</th>
+              <th class="n">UNPLANNED ITEMS</th>
               <th>ETA</th>
               <th class="n">DAYS LATE</th>
               <th class="n">PO AGE</th>
@@ -3919,7 +3918,7 @@
               const unplanned = unplannedUnitsForPo(po);
               return `
                 <tr>
-                  <td><b>${esc(po.po)}</b>${summary.old ? ` ${renderTag('wn', 'Old')}` : ''}${shipped > 0 ? ` ${renderTag('info', 'In container', 'Some or all open units are on a container marked Shipped.')}` : ''}${followUpPlanningTags(po).join(' ')}</td>
+                  <td><b>${esc(po.po)}</b>${summary.old ? ` ${renderTag('wn', 'Old')}` : ''}${shipped > 0 ? ` ${renderTag('info', 'In container', 'Some or all open items are on a container marked Shipped.')}` : ''}${followUpPlanningTags(po).join(' ')}</td>
                   <td title="${attr(purchaserTitle(po.purchaser))}">${esc(po.buyer || '—')}</td>
                   <td class="n">${formatNumber(summary.openLines)}</td>
                   <td class="n">${formatValue(summary.openValue)}</td>
@@ -4071,7 +4070,7 @@
         key: 'unplanned',
         shortTitle: 'At risk',
         title: '1. At risk',
-        description: 'Open balance with no open receipt and unplanned units; the PO is over 90 days old or has a received receipt.',
+        description: 'Open balance with no open receipt and unplanned items; the PO is over 90 days old or has a received receipt.',
         groups: unplannedGroups,
         renderGroup: renderPoGroup,
         tone: 'bad',
@@ -4282,14 +4281,22 @@
     if (buyer) buyer.value = state.buyerFilter;
   }
 
+  function syncToolbarHeight() {
+    const toolbar = document.querySelector('.tb');
+    if (!toolbar) return;
+    document.documentElement.style.setProperty('--app-toolbar-height', `${Math.ceil(toolbar.getBoundingClientRect().height)}px`);
+  }
+
   function render() {
     normalizeLegacyRoute();
     const route = parseRoute();
     const viewKey = route.view;
     const detailId = route.detailId;
     const previousDetailId = state.lastRenderedDetailId;
+    const planWorkspace = viewKey === 'containers' && state.containersView === 'plan' && !detailId;
 
     if (viewKey !== 'home') state.coverageModalOpen = false;
+    document.body.classList.toggle('plan-workspace', planWorkspace);
     renderNavigation(viewKey);
     syncGlobalFilters();
 
@@ -4322,6 +4329,7 @@
     }
 
     state.lastRenderedDetailId = detailId;
+    syncToolbarHeight();
     persistDemoState();
   }
 
@@ -4941,5 +4949,7 @@
   migrateLegacyVendorUpdates();
   syncPlannerAssigned();
   populateFilters();
+  syncToolbarHeight();
   render();
+  window.addEventListener('resize', syncToolbarHeight);
 })();
