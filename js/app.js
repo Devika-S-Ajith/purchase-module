@@ -357,6 +357,7 @@
 
     plannerContainers: [],
     plannerContainerSequence: 0,
+    plannerActiveContainerId: '',
     plannerSelectedLineId: null,
     plannerAssigned: {},
     plannerLineQuery: '',
@@ -1491,6 +1492,7 @@
       arrivedDate: '',
       assignments: [],
     });
+    state.plannerActiveContainerId = `C-${sequence}`;
     clearSummaryCache();
     persistDemoState();
     render();
@@ -1505,6 +1507,7 @@
       return;
     }
     state.plannerContainers = state.plannerContainers.filter((row) => row.id !== containerId);
+    if (state.plannerActiveContainerId === containerId) state.plannerActiveContainerId = '';
     syncPlannerAssigned();
     clearSummaryCache();
     persistDemoState();
@@ -1536,6 +1539,7 @@
     }
     const removedBlocks = removable.reduce((sum, container) => sum + container.assignments.length, 0);
     state.plannerContainers = state.plannerContainers.filter((container) => !containerIsEditable(container));
+    state.plannerActiveContainerId = '';
     state.plannerSelectedLineId = null;
     syncPlannerAssigned();
     clearSummaryCache();
@@ -1664,6 +1668,7 @@
       return false;
     }
 
+    state.plannerActiveContainerId = container.id;
     state.plannerSelectedLineId = null;
     state.plannerPendingAssignment = { lineId: line.id, containerId: container.id };
     render();
@@ -2648,7 +2653,7 @@
     });
 
     return `
-      <div class="card" data-container-card="${attr(container.id)}">
+      <div class="card planner-container-card" data-container-card="${attr(container.id)}">
         <div class="row">
           <div>
             <button class="container-title-btn" data-action="open-container:${attr(container.id)}">
@@ -2665,25 +2670,27 @@
             ${editable ? `<button class="s" data-action="remove-container:${attr(container.id)}" title="Remove this draft or booked container.">Remove</button>` : ''}
           </div>
         </div>
-        <div class="container-summary">
-          <span class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</span>
-          <div class="container-meta">
-            <label>
-              <span class="field-label">Sailing</span>
-              <input type="date" data-container-sailing="${attr(container.id)}" value="${attr(container.sailingDate || '')}">
-            </label>
-            <label>
-              <span class="field-label">Port</span>
-              <input type="text" data-container-port="${attr(container.id)}" value="${attr(container.port || '')}" placeholder="Port">
-            </label>
+        <div class="planner-container-side">
+          <div class="container-summary">
+            <span class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</span>
+            <div class="container-meta">
+              <label>
+                <span class="field-label">Sailing</span>
+                <input type="date" data-container-sailing="${attr(container.id)}" value="${attr(container.sailingDate || '')}">
+              </label>
+              <label>
+                <span class="field-label">Port</span>
+                <input type="text" data-container-port="${attr(container.id)}" value="${attr(container.port || '')}" placeholder="Port">
+              </label>
+            </div>
           </div>
-        </div>
-        <div class="bar">
-          <i class="${fill > 100 ? 'r' : ''}" style="width:${Math.min(100, fill)}%"></i>
-        </div>
-        <div class="sub">
-          ${fill.toFixed(1)}% full${fill > 100 ? ' · OVER CAPACITY' : ''}
-          ${missing ? ` · ${missing} CBM-missing assignment${missing === 1 ? '' : 's'}` : ''}
+          <div class="bar">
+            <i class="${fill > 100 ? 'r' : ''}" style="width:${Math.min(100, fill)}%"></i>
+          </div>
+          <div class="sub">
+            ${fill.toFixed(1)}% full${fill > 100 ? ' · OVER CAPACITY' : ''}
+            ${missing ? ` · ${missing} CBM-missing assignment${missing === 1 ? '' : 's'}` : ''}
+          </div>
         </div>
         <div class="zone container-drop${locked ? ' lock' : ''}" data-planner-zone="${attr(container.id)}">
           ${container.assignments.map((assignment, index) => {
@@ -2706,6 +2713,10 @@
     const allItems = plannerItems();
     const items = filterPlannerItems(allItems);
     const containers = state.plannerContainers.filter((container) => containerIsEditable(container));
+    const activeContainer = containers.find((container) => container.id === state.plannerActiveContainerId)
+      || containers[0]
+      || null;
+    state.plannerActiveContainerId = activeContainer ? activeContainer.id : '';
     const missingCbmAssignments = containers.reduce((sum, container) => sum + plannerMissingCbm(container), 0);
     const typeOptions = Object.entries(CONTAINER_TYPES)
       .map(([key, value]) => `<option value="${key}">${value.label} · ${value.capacity} CBM</option>`)
@@ -2748,7 +2759,26 @@
         </div>
 
         <div class="ctns">
-          ${containers.map(renderPlannerContainerCard).join('') || '<div class="card sub">No draft or booked containers. Add one to start planning.</div>'}
+          ${containers.length ? `
+            <div class="planner-container-tabs" role="tablist" aria-label="Draft and booked containers">
+              ${containers.map((container) => {
+                const fill = (plannerUsedCbm(container) / container.capacity) * 100;
+                const status = CONTAINER_STATUSES[containerStatusKey(container)];
+                const active = container.id === state.plannerActiveContainerId;
+                return `
+                  <button
+                    class="planner-container-tab${active ? ' on' : ''}"
+                    data-action="select-plan-container:${attr(container.id)}"
+                    role="tab"
+                    aria-selected="${active ? 'true' : 'false'}"
+                  >
+                    <b>${esc(container.name)}</b>
+                    <span class="sub">${esc(container.type)} · ${esc(status.label)} · ${formatNumber(containerUnits(container))} u · ${fill.toFixed(0)}% full</span>
+                  </button>`;
+              }).join('')}
+            </div>
+            ${renderPlannerContainerCard(activeContainer)}
+          ` : '<div class="card sub">No draft or booked containers. Add one to start planning.</div>'}
         </div>
       </div>`;
   }
@@ -3167,6 +3197,7 @@
     }
     state.plannerContainers = [];
     state.plannerContainerSequence = 0;
+    state.plannerActiveContainerId = '';
     state.plannerAssigned = {};
     state.plannerSelectedLineId = null;
     state.plannerPendingAssignment = null;
@@ -4142,6 +4173,11 @@
 
       case 'add-container':
         addPlannerContainer(document.getElementById('planner-container-type')?.value || '');
+        break;
+
+      case 'select-plan-container':
+        state.plannerActiveContainerId = args[0];
+        render();
         break;
 
       case 'book-container':
