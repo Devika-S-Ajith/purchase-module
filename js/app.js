@@ -886,46 +886,6 @@
      6. Dashboard
      ========================================================================= */
 
-  function dashboardUpcomingEtas() {
-    return realContainerGroups()
-      .filter((group) => !group.isBlank && !realGroupReceived(group))
-      .map((group) => ({ group, eta: realGroupEta(group) }))
-      .filter((row) => row.eta && row.eta >= AS_OF)
-      .sort((a, b) => a.eta.localeCompare(b.eta) || a.group.label.localeCompare(b.group.label))
-      .slice(0, 6);
-  }
-
-  function renderDashboardUpcomingEtas() {
-    const rows = dashboardUpcomingEtas();
-    return `
-      <section class="card eta-card">
-        <div class="row section-head">
-          <h2>Upcoming ETAs</h2>
-          <button class="s" data-action="containers-water">Open containers</button>
-        </div>
-        ${rows.length ? `
-          <div class="sc">
-            <table class="dashboard-table eta-table">
-              <thead><tr><th>Container</th><th>ETA</th><th>Vendor</th><th>POs</th></tr></thead>
-              <tbody>
-                ${rows.map(({ group, eta }) => {
-                  const vendors = realGroupVendors(group);
-                  const pos = realGroupPos(group);
-                  const trackingTag = group.isContainer ? '' : renderTag('wn', 'LCL / carrier reference');
-                  return `
-                    <tr class="clickable" data-action="open-container:${attr(group.key)}">
-                      <td><b>${esc(group.isContainer ? `Container ${group.label}` : `Tracking no. ${group.label}`)}</b>${trackingTag}<span class="sub">${esc(containerRecordWarehouse({ kind: 'real', key: group.key, group }) || '—')}</span></td>
-                      <td><b>${formatDate(eta)}</b><span class="sub">${esc(relativeEta(eta))}</span></td>
-                      <td>${esc(vendors.slice(0, 2).join(', ') || '—')}${vendors.length > 2 ? ` <span class="sub">+${vendors.length - 2}</span>` : ''}</td>
-                      <td>${esc(pos.slice(0, 2).map((po) => po.po).join(', ') || '—')}${pos.length > 2 ? ` <span class="sub">+${pos.length - 2}</span>` : ''}</td>
-                    </tr>`;
-                }).join('')}
-              </tbody>
-            </table>
-          </div>` : '<div class="sub">No upcoming ETAs in this export.</div>'}
-      </section>`;
-  }
-
   function renderHome() {
     const rows = dashboardOrders();
     const end14 = addDays(AS_OF, 14);
@@ -1025,8 +985,6 @@
               <span><i style="background:${colour}"></i>${esc(label)} <b>${formatNumber(value)}</b> <span class="sub">${coveragePct(value).toFixed(1)}%</span></span>`).join('')}
           </div>
         </section>
-
-        ${renderDashboardUpcomingEtas()}
 
         <section class="card vendors-card">
           <div class="row section-head">
@@ -1658,7 +1616,7 @@
     render();
     const units = containerUnits(container);
     showToast(
-      `${container.name} marked shipped — ${formatNumber(units)} units moved to On the water` +
+      `${container.name} marked shipped - ${formatNumber(units)} units moved to In transit` +
       `${container.sailingDate ? ` (sailing ${formatDate(container.sailingDate)})` : ''}.`
     );
   }
@@ -2657,7 +2615,7 @@
     const counts = containerViewCounts();
     const views = [
       ['plan', 'Plan'],
-      ['water', 'On the water'],
+      ['water', 'In transit'],
       ['arrived', 'Arrived'],
     ];
     return `
@@ -4031,10 +3989,8 @@
         break;
 
       case 'ship-on-way':
-      case 'containers-water':
         state.containersView = 'water';
-        if (action === 'ship-on-way') state.containersStatus = 'In transit';
-        else state.containersStatus = '';
+        state.containersStatus = 'In transit';
         state.containersQuery = '';
         state.containersType = '';
         state.containersPage = 1;

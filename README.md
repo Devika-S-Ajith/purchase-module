@@ -27,20 +27,20 @@ The sidebar is:
 - **ORDERS** — Purchase orders, Vendors
 - **← Back to Ariel Analytics** — placeholder link at the bottom
 
-Old links redirect to the merged Containers page: `#planner`, `#import`, `#receive` and `#vendor-updates` open the **Plan** view; `#shipments` opens the **On the water** view. The page name “Planner” and the old Shipments, Import packing list, Receive one receipt and Vendor updates sidebar entries are gone.
+Old links redirect to the merged Containers page: `#planner`, `#import`, `#receive` and `#vendor-updates` open the **Plan** view; `#shipments` opens the **In transit** view. The page name “Planner” and the old Shipments, Import packing list, Receive one receipt and Vendor updates sidebar entries are gone.
 
 ### Dashboard
 
 Four PO-based KPIs: Open POs (including open value), In transit, At risk and Not yet planned. They use the same PO buckets as the coverage bar: Open POs = In transit + Planned + Not yet planned + At risk, while In transit, At risk and Not yet planned match their coverage segments exactly. The full-width Order coverage bar counts each PO once and splits them into Received, In transit, Planned, Not yet planned and At risk; its header also shows how many of the total POs are open.
 
-Below it is an **Upcoming ETAs** table whose first column is **Container**. Rows open the matching container detail panel. Then comes Top 8 vendors by open value with a PO-based Received %; “View all vendors” opens the full vendor list.
+Below it is Top 8 vendors by open value with a PO-based Received %; “View all vendors” opens the full vendor list.
 
 ### Containers
 
 The page has three segmented views with counts:
 
 - **Plan** — exactly the previous planning behaviour, limited to Draft and Booked containers. Includes every open Import balance without an open receipt, including remainders of partly received POs. Type a container name/type and add it (40HC 68 CBM, 40ST 58 CBM and 20GP 28 CBM are recognised capacity assumptions), drag or tap-to-assign open lines, snap down to whole cartons using `BoxQty` (a final sub-carton remainder can be planned as a partial block), and warn when CBM or carton data is missing. Search the awaiting lines by vendor, PO or item ID. A quantity dialog lets one PO line split across containers; assigned blocks are labelled B1, B2, … Fill turns red over 100%.
-- **On the water** — Shipped containers created in Plan plus real receipt-export groups without a `ReceiptDate`. Real groups are collapsed by default, paginated 20 per page and show shared-container counts. Search covers container/tracking, invoice, PO and vendor; filters cover receipt type and the plain status labels (“On the way”, “Past ETA”, “No ETA”, “No matching PO”, “Invalid data”).
+- **In transit** — Shipped containers created in Plan plus real receipt-export groups without a `ReceiptDate`. Real groups are collapsed by default, paginated 20 per page and show shared-container counts. Search covers container/tracking, invoice, PO and vendor; filters cover receipt type and the plain status labels (“On the way”, “Past ETA”, “No ETA”, “No matching PO”, “Invalid data”).
 - **Arrived** — Arrived containers created in Plan plus real receipt-export groups with a `ReceiptDate`. Uses the same grouping, search and type filters.
 
 Container detail uses `#containers/<id>`: a drawer on wide screens and a full-page view with a Back button on narrow screens. Closing restores the current view, filters and scroll position. The header shows the container/tracking number, type, vendor and PO counts, port, sailing date, ETA, warehouse, a Draft → Booked → Shipped → Arrived stepper and the next-step action. Contents are grouped by PO/item with Vendor, PO, Item, Ordered, In this container, Balance after and Result tags. Contents are read-only by default. A Booked container ships “as planned” by default; “Shipped differently” can reduce a line before arrival, and any shortfall returns to the PO balance. Marking it Arrived moves shipped units to Received and locks the container.
@@ -53,7 +53,7 @@ The header’s **Reset demo data** clears only the merged Containers localStorag
 
 ### Container naming
 
-A real container ID is 4 letters followed by 7 digits after removing a trailing `-W` (for example `TCLU1234567-W` → `TCLU1234567`). Anything else is shown as **Tracking no.** with an **LCL / carrier reference** tag. Grouping uses only the normalised tracking value; no separate carrier-reference field is invented. The current export has 445 distinct normalised tracking IDs (203 on the water, 242 arrived) and 77 shared containers. The seven receipts with no tracking number are kept in a separate “Receipts without a tracking number” table and are not counted as containers. Planner-created containers use the editable **Container ID** field; adding a later real container number does not rename them.
+A real container ID is 4 letters followed by 7 digits after removing a trailing `-W` (for example `TCLU1234567-W` → `TCLU1234567`). Anything else is shown as **Tracking no.** with an **LCL / carrier reference** tag. Grouping uses only the normalised tracking value; no separate carrier-reference field is invented. The current export has 445 distinct normalised tracking IDs (203 in transit, 242 arrived) and 77 shared containers. The seven receipts with no tracking number are kept in a separate “Receipts without a tracking number” table and are not counted as containers. Planner-created containers use the editable **Container ID** field; adding a later real container number does not rename them.
 
 ### Purchase orders
 
