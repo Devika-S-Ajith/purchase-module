@@ -4,8 +4,8 @@
  * Data comes from the three CSV exports, pre-processed by
  * scripts/build_data.py into js/data.js.
  *
- * Nothing in the planning screens is persisted; containers created in the
- * Planner page live only for the current browser session.
+ * Containers merge planning, real receipt shipments and vendor details. Demo
+ * edits are persisted in this browser under a single localStorage key.
  */
 (function () {
   'use strict';
@@ -67,14 +67,14 @@
   ];
 
   const VENDOR_UPDATE_STORAGE_KEY = 'ariel.vendorUpdates.v1';
+  const DEMO_STORAGE_KEY = 'ariel.containers.v1';
 
-  const RECEIPT_STATUSES = [
-    'Received',
-    'In transit',
-    'Overdue',
-    'No ETA',
-    'Unmatched',
-    'Invalid data',
+  const VENDOR_CONFIRMATION_STATUSES = [
+    'Not sent',
+    'Sent',
+    'Confirmed',
+    'Changed',
+    'Rejected',
   ];
 
   const RECEIPT_STATUS_LABELS = {
@@ -304,6 +304,18 @@
     return vendorId || '—';
   }
 
+  function normalizeTracking(value) {
+    return String(value || '').trim().replace(/-W$/i, '').toUpperCase();
+  }
+
+  function isContainerShaped(value) {
+    return /^[A-Z]{4}\d{7}$/.test(normalizeTracking(value));
+  }
+
+  function receiptContainerKey(receipt) {
+    return normalizeTracking(receipt.tracking) || `R-${receipt.id}`;
+  }
+
   /* =========================================================================
      4. Runtime state and derived model
      ========================================================================= */
@@ -322,27 +334,26 @@
     portFilter: '',
     expandedOrders: new Set(),
 
-    shipmentQuery: '',
-    shipmentType: '',
-    shipmentStatus: '',
-    shipmentPage: 1,
-    shipmentPageSize: 20,
-    expandedShipmentGroups: new Set(),
+    containersView: 'plan',
+    containersQuery: '',
+    containersType: '',
+    containersStatus: '',
+    containersPage: 1,
+    containersPageSize: 20,
+    expandedContainerGroups: new Set(),
+    containersReturnScroll: null,
+    lastRenderedDetailId: '',
+    shippingLineEdit: '',
+    containerDocuments: {},
+    vendorDetails: {},
+    poConfirmations: {},
 
-    receiveReceiptId: '',
-    importGroupKey: '',
-    importPreview: null,
-    importPreviews: {},
     reminders: [],
     followUpOpenCategories: new Set(['unplanned']),
     followUpOpenVendors: new Set(),
     followUpReminderDraft: null,
 
     vendorUpdates: [],
-    vendorUpdateSequence: 0,
-    vendorUpdatePo: '',
-    vendorUpdateQuery: '',
-    vendorUpdateStatus: '',
 
     plannerContainers: [],
     plannerContainerSequence: 0,
@@ -370,20 +381,99 @@
     }
   }
 
-  function persistVendorUpdates() {
+  function normalizePlannerContainer(raw, index) {
+    const id = String(raw && raw.id ? raw.id : `C-${index + 1}`);
+    const type = String((raw && raw.type) || '40HC');
+    const capacity = Number(raw && raw.capacity) || (CONTAINER_TYPES[type] ? CONTAINER_TYPES[type].capacity : CONTAINER_TYPES['40HC'].capacity);
+    const assignments = Array.isArray(raw && raw.assignments) ? raw.assignments : [];
+
+    return {
+      id,
+      name: String((raw && (raw.name || raw.containerName)) || (id.startsWith('C-') ? `Container ${id.slice(2)}` : id)),
+      type,
+      capacity,
+      status: CONTAINER_STATUSES[raw && raw.status] ? raw.status : 'draft',
+      sailingDate: String((raw && raw.sailingDate) || ''),
+      port: String((raw && raw.port) || ''),
+      etaDate: String((raw && raw.etaDate) || ''),
+      arrivedDate: String((raw && raw.arrivedDate) || ''),
+      assignments: assignments.map((assignment) => {
+        const line = lineById.get(Number(assignment.lineId));
+        const units = Math.max(0, Number(assignment.units) || 0);
+        const plannedUnits = Math.max(units, Number(assignment.plannedUnits) || units);
+        const cbmPerUnit = assignment.cbmPerUnit != null
+          ? Number(assignment.cbmPerUnit)
+          : (line && line.cbm > 0 && line.ordered > 0 ? line.cbm / line.ordered : null);
+        const cbm = assignment.cbm == null
+          ? (cbmPerUnit == null ? null : units * cbmPerUnit)
+          : Number(assignment.cbm) || 0;
+        return {
+          lineId: Number(assignment.lineId),
+          units,
+          plannedUnits,
+          cbm,
+          cbmPerUnit,
+          carton: Number(assignment.carton) || (line && line.boxQty > 0 ? line.boxQty : 1),
+          block: String(assignment.block || 'B1'),
+        };
+      }),
+    };
+  }
+
+  function loadDemoState() {
+    let parsed = null;
     try {
-      window.localStorage.setItem(VENDOR_UPDATE_STORAGE_KEY, JSON.stringify(state.vendorUpdates));
+      const raw = window.localStorage.getItem(DEMO_STORAGE_KEY);
+      parsed = raw ? JSON.parse(raw) : null;
+    } catch (error) {
+      parsed = null;
+    }
+
+    if (!parsed || typeof parsed !== 'object') return;
+
+    state.plannerContainers = Array.isArray(parsed.plannerContainers)
+      ? parsed.plannerContainers.filter((row) => row && typeof row === 'object').map(normalizePlannerContainer)
+      : [];
+    state.plannerContainerSequence = Math.max(
+      Number(parsed.plannerContainerSequence) || 0,
+      ...state.plannerContainers.map((container) => {
+        const match = /^C-(\d+)$/.exec(container.id);
+        return match ? Number(match[1]) : 0;
+      }),
+      0
+    );
+    state.simulatedReceipts = parsed.simulatedReceipts && typeof parsed.simulatedReceipts === 'object'
+      ? parsed.simulatedReceipts
+      : {};
+    state.simulatedLineQty = parsed.simulatedLineQty && typeof parsed.simulatedLineQty === 'object'
+      ? parsed.simulatedLineQty
+      : {};
+    state.poConfirmations = parsed.poConfirmations && typeof parsed.poConfirmations === 'object'
+      ? parsed.poConfirmations
+      : {};
+    state.vendorDetails = parsed.vendorDetails && typeof parsed.vendorDetails === 'object'
+      ? parsed.vendorDetails
+      : {};
+    state.containerDocuments = parsed.containerDocuments && typeof parsed.containerDocuments === 'object'
+      ? parsed.containerDocuments
+      : {};
+  }
+
+  function persistDemoState() {
+    try {
+      window.localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify({
+        version: 1,
+        plannerContainers: state.plannerContainers,
+        plannerContainerSequence: state.plannerContainerSequence,
+        simulatedReceipts: state.simulatedReceipts,
+        simulatedLineQty: state.simulatedLineQty,
+        poConfirmations: state.poConfirmations,
+        vendorDetails: state.vendorDetails,
+        containerDocuments: state.containerDocuments,
+      }));
     } catch (error) {
       /* The prototype still works in memory when storage is unavailable. */
     }
-  }
-
-  function vendorUpdateStatusVariant(status) {
-    if (status === 'Arrived') return 'ok';
-    if (status === 'Delayed') return 'bad';
-    if (status === 'Sailing') return 'info';
-    if (status === 'Booked' || status === 'Ready to ship' || status === 'Documents pending') return 'wn';
-    return '';
   }
 
   function clearSummaryCache() {
@@ -681,17 +771,6 @@
     return filteredOrders({ includeHeaderOnly: false, status: '', port: '', query: '' });
   }
 
-  function receiptsForFilter(ignoreSegment = false, ignoreStatus = false) {
-    return receiptRows.filter((receipt) => {
-      if (!ignoreSegment && state.segmentFilter !== 'all' && receipt.segment !== state.segmentFilter) return false;
-      if (state.vendorFilter && receipt.vendorId !== state.vendorFilter) return false;
-      if (state.buyerFilter && (!receipt.poRef || receipt.poRef.buyer !== state.buyerFilter)) return false;
-      if (state.shipmentType && receipt.type !== state.shipmentType) return false;
-      if (!ignoreStatus && state.shipmentStatus && getReceiptStatus(receipt) !== state.shipmentStatus) return false;
-      return true;
-    });
-  }
-
   /* =========================================================================
      5. Shared render helpers
      ========================================================================= */
@@ -704,28 +783,6 @@
           ${subtitle ? `<div class="sub">${subtitle}</div>` : ''}
         </div>
         ${extra}
-      </div>`;
-  }
-
-  function renderMetricCard(value, label, targetView, isHot = false, note = '') {
-    return `
-      <div class="card kp${isHot ? ' hot' : ''}" data-action="go:${targetView}">
-        <b>${value}</b>
-        <span class="sub">${esc(label)}</span>
-        ${note ? `<span class="sub">${note}</span>` : ''}
-      </div>`;
-  }
-
-  function renderCoverageNote() {
-    const counts = HEALTH.counts;
-    return `
-      <div class="card sub">
-        <b>Export coverage</b> ·
-        ${formatNumber(counts.posWithLines)} POs with lines ·
-        ${formatNumber(counts.headerOnlyPos)} header-only POs ·
-        ${formatNumber(counts.matchedReceipts)} of ${formatNumber(counts.receipts)} receipts matched ·
-        ${formatNumber(counts.detailOnlyPos)} detail-only POs (${formatNumber(counts.detailOnlyLines)} lines) ·
-        Data as of ${AS_OF_LABEL}
       </div>`;
   }
 
@@ -780,15 +837,16 @@
       const extra = history.containers.length > 1 ? ` +${formatNumber(history.containers.length - 1)}` : '';
       const date = first[history.dateKey] ? ` ${formatDate(first[history.dateKey])}` : '';
       return `
-        <span class="mono">${esc(first.id)}${extra}</span>
+        <a class="mono" href="#containers/${encodeURIComponent(first.id)}" data-action="open-container:${attr(first.id)}">${esc(first.name || first.id)}${extra}</a>
         <span class="sub">· ${history.label}${date}${first.port ? ` · ${esc(first.port)}` : ''}</span>`;
     }
     if (!summary.nextReceipt) return '<span class="sub">No receipt</span>';
     const receipt = summary.nextReceipt;
-    const tracking = receipt.tracking || 'No tracking';
+    const key = receiptContainerKey(receipt);
+    const tracking = normalizeTracking(receipt.tracking) || 'No tracking no.';
     const type = receipt.type || '-';
     return `
-      <span class="mono">${esc(tracking)}</span>
+      <a class="mono" href="#containers/${encodeURIComponent(key)}" data-action="open-container:${attr(key)}">${esc(tracking)}</a>
       <span class="sub">· ${esc(type)} · ${formatNumber(summary.receiptCount)} shipment${summary.receiptCount === 1 ? '' : 's'}</span>`;
   }
 
@@ -827,6 +885,46 @@
   /* =========================================================================
      6. Dashboard
      ========================================================================= */
+
+  function dashboardUpcomingEtas() {
+    return realContainerGroups()
+      .filter((group) => !group.isBlank && !realGroupReceived(group))
+      .map((group) => ({ group, eta: realGroupEta(group) }))
+      .filter((row) => row.eta && row.eta >= AS_OF)
+      .sort((a, b) => a.eta.localeCompare(b.eta) || a.group.label.localeCompare(b.group.label))
+      .slice(0, 6);
+  }
+
+  function renderDashboardUpcomingEtas() {
+    const rows = dashboardUpcomingEtas();
+    return `
+      <section class="card eta-card">
+        <div class="row section-head">
+          <h2>Upcoming ETAs</h2>
+          <button class="s" data-action="containers-water">Open containers</button>
+        </div>
+        ${rows.length ? `
+          <div class="sc">
+            <table class="dashboard-table eta-table">
+              <thead><tr><th>Container</th><th>ETA</th><th>Vendor</th><th>POs</th></tr></thead>
+              <tbody>
+                ${rows.map(({ group, eta }) => {
+                  const vendors = realGroupVendors(group);
+                  const pos = realGroupPos(group);
+                  const trackingTag = group.isContainer ? '' : renderTag('wn', 'LCL / carrier reference');
+                  return `
+                    <tr class="clickable" data-action="open-container:${attr(group.key)}">
+                      <td><b>${esc(group.isContainer ? `Container ${group.label}` : `Tracking no. ${group.label}`)}</b>${trackingTag}<span class="sub">${esc(containerRecordWarehouse({ kind: 'real', key: group.key, group }) || '—')}</span></td>
+                      <td><b>${formatDate(eta)}</b><span class="sub">${esc(relativeEta(eta))}</span></td>
+                      <td>${esc(vendors.slice(0, 2).join(', ') || '—')}${vendors.length > 2 ? ` <span class="sub">+${vendors.length - 2}</span>` : ''}</td>
+                      <td>${esc(pos.slice(0, 2).map((po) => po.po).join(', ') || '—')}${pos.length > 2 ? ` <span class="sub">+${pos.length - 2}</span>` : ''}</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>` : '<div class="sub">No upcoming ETAs in this export.</div>'}
+      </section>`;
+  }
 
   function renderHome() {
     const rows = dashboardOrders();
@@ -905,7 +1003,7 @@
             <span class="sub">At risk</span>
             <span class="sub">No open receipt · unplanned balance</span>
           </button>
-          <button class="card kp neutral" data-action="go:planner">
+          <button class="card kp neutral" data-action="containers-plan">
             <b>${formatNumber(totals.notYetPlannedPos)}</b>
             <span class="sub">Not yet planned</span>
             <span class="sub">${notYetPlannedPct}% of open POs</span>
@@ -927,6 +1025,8 @@
               <span><i style="background:${colour}"></i>${esc(label)} <b>${formatNumber(value)}</b> <span class="sub">${coveragePct(value).toFixed(1)}%</span></span>`).join('')}
           </div>
         </section>
+
+        ${renderDashboardUpcomingEtas()}
 
         <section class="card vendors-card">
           <div class="row section-head">
@@ -997,348 +1097,6 @@
           </table>
         </div>
       </section>`;
-  }
-
-  /* =========================================================================
-     Vendor updates
-     ========================================================================= */
-
-  function vendorUpdatePoOptions() {
-    return Array.from(poById.values())
-      .filter((po) => po.lines.length)
-      .sort((a, b) => a.po.localeCompare(b.po))
-      .map((po) => {
-        const selected = state.vendorUpdatePo === po.po ? ' selected' : '';
-        return `<option value="${attr(po.po)}"${selected}>${esc(po.po)} · ${esc(po.vendorId || 'No vendor')}</option>`;
-      })
-      .join('');
-  }
-
-  function vendorUpdatePoMeta(po) {
-    if (!po) return 'Select a PO to see its vendor, buyer and line count.';
-    return `Vendor <b>${esc(po.vendorId || '—')}</b> · Buyer <b>${esc(po.buyer || '—')}</b> · ${formatNumber(po.lines.length)} line${po.lines.length === 1 ? '' : 's'}`;
-  }
-
-  function filteredVendorUpdates() {
-    const query = state.vendorUpdateQuery.trim().toLowerCase();
-    return state.vendorUpdates.filter((update) => {
-      if (state.vendorUpdateStatus && update.status !== state.vendorUpdateStatus) return false;
-      if (!query) return true;
-      return [
-        update.po,
-        update.vendor,
-        update.buyer,
-        update.tracking,
-        update.invoice,
-        update.vessel,
-        update.port,
-        update.warehouse,
-        update.status,
-        update.source,
-        update.contact,
-        update.notes,
-      ].join(' ').toLowerCase().includes(query);
-    });
-  }
-
-  function renderVendorUpdateList(updates) {
-    if (!updates.length) {
-      return `<div class="empty-state">${state.vendorUpdates.length ? 'No vendor updates match the current search.' : 'No vendor updates logged yet.'}</div>`;
-    }
-
-    return `
-      <div class="sc">
-        <table class="compact-table vendor-updates-table">
-          <thead>
-            <tr>
-              <th>PO / VENDOR</th>
-              <th>SHIPMENT</th>
-              <th>STATUS</th>
-              <th>DATES</th>
-              <th>VENDOR INPUT</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${updates.map((update) => {
-              const measurements = [
-                update.cartons != null ? `${formatNumber(update.cartons)} cartons` : '',
-                update.grossWeight != null ? `${Number(update.grossWeight).toLocaleString('en-US', { maximumFractionDigits: 2 })} kg` : '',
-                update.cbm != null ? formatCbm(update.cbm) : '',
-              ].filter(Boolean);
-              const place = [update.port, update.warehouse].filter(Boolean).join(' · ');
-              return `
-                <tr>
-                  <td>
-                    <a href="#orders" data-action="openpo:${attr(update.po)}"><b>${esc(update.po)}</b></a>
-                    <span class="sub">${esc(update.vendor || '—')}${update.buyer ? ` · ${esc(update.buyer)}` : ''}</span>
-                    <span class="sub">Logged ${update.loggedAt ? formatDate(update.loggedAt) : '—'}${update.loggedTime ? ` · ${esc(update.loggedTime)}` : ''}</span>
-                  </td>
-                  <td>
-                    <span class="mono">${esc(update.tracking || '—')}</span>
-                    <span class="sub">${update.invoice ? `Invoice ${esc(update.invoice)}` : 'No invoice'}${update.vessel ? ` · ${esc(update.vessel)}` : ''}</span>
-                    <span class="sub">${place ? esc(place) : 'No port / warehouse'}</span>
-                  </td>
-                  <td>
-                    ${update.status ? renderTag(vendorUpdateStatusVariant(update.status), update.status) : '<span class="sub">—</span>'}
-                    <span class="sub">${esc(update.source || '—')}</span>
-                  </td>
-                  <td>
-                    <span class="sub">ETD ${update.etd ? formatDate(update.etd) : '—'}</span>
-                    <span class="sub">ETA ${update.eta ? formatDate(update.eta) : '—'}</span>
-                    ${update.eta ? `<span class="sub">${esc(relativeEta(update.eta))}</span>` : ''}
-                  </td>
-                  <td>
-                    ${update.contact ? `<b>${esc(update.contact)}</b>` : '<span class="sub">No contact</span>'}
-                    ${update.notes ? `<div class="vendor-update-notes">${esc(update.notes)}</div>` : ''}
-                    ${measurements.length ? `<span class="sub">${esc(measurements.join(' · '))}</span>` : ''}
-                  </td>
-                  <td>
-                    <button class="s" data-action="delete-vendor-update:${attr(update.id)}" title="Remove this vendor update">Delete</button>
-                  </td>
-                </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>`;
-  }
-
-  function renderVendorUpdates() {
-    const updates = filteredVendorUpdates();
-    const po = poById.get(state.vendorUpdatePo);
-    const portOptions = (DATA.ports || [])
-      .map((port) => `<option value="${attr(port)}">${esc(port)}</option>`)
-      .join('');
-    const statusOptions = VENDOR_UPDATE_STATUSES
-      .map((status) => `<option value="${attr(status)}">${esc(status)}</option>`)
-      .join('');
-    const sourceOptions = VENDOR_UPDATE_SOURCES
-      .map((source) => `<option value="${attr(source)}"${source === 'Email' ? ' selected' : ''}>${esc(source)}</option>`)
-      .join('');
-    const statusFilterOptions = VENDOR_UPDATE_STATUSES
-      .map((status) => `<option value="${attr(status)}"${state.vendorUpdateStatus === status ? ' selected' : ''}>${esc(status)}</option>`)
-      .join('');
-
-    return `
-      ${renderHeader(
-        'Vendor updates',
-        'Capture shipment and other details supplied by vendors.',
-        `<div class="sub">${formatNumber(state.vendorUpdates.length)} saved · browser-local</div>`
-      )}
-
-      <div class="vendor-update-layout">
-        <section class="card">
-          <div class="row section-head">
-            <h2>Log vendor input</h2>
-            <span class="sub">Fields marked * are required</span>
-          </div>
-
-          <form id="vendor-update-form" class="vendor-update-form">
-            <label class="vf">
-              <span>PO *</span>
-              <select id="vendor-update-po">
-                <option value="">Select a PO…</option>
-                ${vendorUpdatePoOptions()}
-              </select>
-            </label>
-            <div class="vendor-update-meta" id="vendor-update-po-meta">${vendorUpdatePoMeta(po)}</div>
-
-            <div class="vf-grid">
-              <label class="vf">
-                <span>Shipment / tracking</span>
-                <input id="vendor-update-tracking" type="text" placeholder="Container, tracking or booking ref">
-              </label>
-              <label class="vf">
-                <span>Invoice / booking no.</span>
-                <input id="vendor-update-invoice" type="text" placeholder="Vendor invoice or booking no.">
-              </label>
-              <label class="vf">
-                <span>Vessel / carrier</span>
-                <input id="vendor-update-vessel" type="text" placeholder="Vessel or carrier">
-              </label>
-              <label class="vf">
-                <span>Port</span>
-                <select id="vendor-update-port">
-                  <option value="">Select port…</option>
-                  ${portOptions}
-                </select>
-              </label>
-              <label class="vf">
-                <span>ETD</span>
-                <input id="vendor-update-etd" type="date">
-              </label>
-              <label class="vf">
-                <span>ETA</span>
-                <input id="vendor-update-eta" type="date">
-              </label>
-              <label class="vf">
-                <span>Warehouse</span>
-                <input id="vendor-update-warehouse" type="text" placeholder="Destination warehouse">
-              </label>
-              <label class="vf">
-                <span>Cartons</span>
-                <input id="vendor-update-cartons" type="number" min="0" step="1" placeholder="0">
-              </label>
-              <label class="vf">
-                <span>Gross weight (kg)</span>
-                <input id="vendor-update-weight" type="number" min="0" step="0.01" placeholder="0">
-              </label>
-              <label class="vf">
-                <span>CBM</span>
-                <input id="vendor-update-cbm" type="number" min="0" step="0.01" placeholder="0">
-              </label>
-              <label class="vf">
-                <span>Status</span>
-                <select id="vendor-update-status">
-                  <option value="">Select status…</option>
-                  ${statusOptions}
-                </select>
-              </label>
-              <label class="vf">
-                <span>Source</span>
-                <select id="vendor-update-source">${sourceOptions}</select>
-              </label>
-              <label class="vf">
-                <span>Received from</span>
-                <input id="vendor-update-contact" type="text" placeholder="Vendor contact name">
-              </label>
-            </div>
-
-            <label class="vf">
-              <span>Other details / notes</span>
-              <textarea id="vendor-update-notes" rows="3" placeholder="Packaging, documents, delays, partial shipment, other POs in the same container…"></textarea>
-            </label>
-
-            <div class="row" style="justify-content:flex-start">
-              <button class="p" type="button" data-action="save-vendor-update">Save vendor update</button>
-              <button class="s" type="button" data-action="clear-vendor-update-form">Clear</button>
-            </div>
-          </form>
-        </section>
-
-        <section class="card">
-          <div class="row section-head">
-            <h2>Captured updates</h2>
-            <span class="sub" id="vendor-update-count">${formatNumber(updates.length)} shown</span>
-          </div>
-          <div class="row" style="justify-content:flex-start; margin-bottom:8px">
-            <input
-              type="search"
-              id="vendor-update-search"
-              placeholder="Search PO, vendor, tracking or notes"
-              value="${attr(state.vendorUpdateQuery)}"
-            >
-            <select id="vendor-update-status-filter">
-              <option value="">All statuses</option>
-              ${statusFilterOptions}
-            </select>
-          </div>
-          <div id="vendor-update-list">${renderVendorUpdateList(updates)}</div>
-        </section>
-      </div>`;
-  }
-
-  function updateVendorUpdateList() {
-    const host = document.getElementById('vendor-update-list');
-    if (!host) return;
-    const updates = filteredVendorUpdates();
-    host.innerHTML = renderVendorUpdateList(updates);
-    const count = document.getElementById('vendor-update-count');
-    if (count) count.textContent = `${formatNumber(updates.length)} shown`;
-  }
-
-  function updateVendorUpdatePoMeta() {
-    const select = document.getElementById('vendor-update-po');
-    const host = document.getElementById('vendor-update-po-meta');
-    if (!select || !host) return;
-    host.innerHTML = vendorUpdatePoMeta(poById.get(select.value));
-  }
-
-  function readVendorUpdateValue(id) {
-    const element = document.getElementById(id);
-    return element ? String(element.value || '').trim() : '';
-  }
-
-  function readVendorUpdateNumber(id) {
-    const value = readVendorUpdateValue(id);
-    if (!value) return null;
-    const number = Number(value);
-    return Number.isFinite(number) ? number : null;
-  }
-
-  function saveVendorUpdate() {
-    const po = poById.get(readVendorUpdateValue('vendor-update-po'));
-    if (!po) {
-      showToast('Select a PO before saving the vendor update.');
-      const select = document.getElementById('vendor-update-po');
-      if (select) select.focus();
-      return;
-    }
-
-    const entry = {
-      id: `vu-${Date.now()}-${state.vendorUpdateSequence}`,
-      po: po.po,
-      vendor: po.vendorId || '',
-      buyer: po.buyer || '',
-      tracking: readVendorUpdateValue('vendor-update-tracking'),
-      invoice: readVendorUpdateValue('vendor-update-invoice'),
-      vessel: readVendorUpdateValue('vendor-update-vessel'),
-      port: readVendorUpdateValue('vendor-update-port'),
-      etd: readVendorUpdateValue('vendor-update-etd'),
-      eta: readVendorUpdateValue('vendor-update-eta'),
-      warehouse: readVendorUpdateValue('vendor-update-warehouse'),
-      cartons: readVendorUpdateNumber('vendor-update-cartons'),
-      grossWeight: readVendorUpdateNumber('vendor-update-weight'),
-      cbm: readVendorUpdateNumber('vendor-update-cbm'),
-      status: readVendorUpdateValue('vendor-update-status'),
-      source: readVendorUpdateValue('vendor-update-source') || 'Email',
-      contact: readVendorUpdateValue('vendor-update-contact'),
-      notes: readVendorUpdateValue('vendor-update-notes'),
-      loggedAt: todayIso(),
-      loggedTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-
-    const hasDetail = [
-      'tracking',
-      'invoice',
-      'vessel',
-      'port',
-      'etd',
-      'eta',
-      'warehouse',
-      'status',
-      'contact',
-      'notes',
-    ].some((key) => entry[key]) || ['cartons', 'grossWeight', 'cbm'].some((key) => entry[key] != null);
-
-    if (!hasDetail) {
-      showToast('Add at least one shipment detail before saving.');
-      return;
-    }
-
-    state.vendorUpdates.unshift(entry);
-    state.vendorUpdateSequence += 1;
-    state.vendorUpdatePo = po.po;
-    state.vendorUpdateQuery = '';
-    state.vendorUpdateStatus = '';
-    persistVendorUpdates();
-    render();
-    showToast(`Vendor update saved for ${po.po}.`);
-  }
-
-  function deleteVendorUpdate(id) {
-    const update = state.vendorUpdates.find((row) => row.id === id);
-    if (!update) return;
-    state.vendorUpdates = state.vendorUpdates.filter((row) => row.id !== id);
-    persistVendorUpdates();
-    render();
-    showToast(`Vendor update removed for ${update.po}.`);
-  }
-
-  function clearVendorUpdateForm() {
-    state.vendorUpdatePo = '';
-    render();
-    showToast('Vendor update form cleared.');
   }
 
   /* =========================================================================
@@ -1479,7 +1237,7 @@
               <th class="n">BALANCE</th>
               <th class="n">UNPLANNED</th>
               <th>ETA</th>
-              <th>SHIPMENT</th>
+              <th>CONTAINERS</th>
               <th>STATUS</th>
             </tr>
           </thead>
@@ -1520,7 +1278,7 @@
     } else if (summary.balance > 0 && !hasOpenReceipt && unplanned > 0) {
       tags.push(renderTag('', 'Not yet planned', 'Young PO balance that is not yet planned for shipment.'));
     } else if (summary.balance > 0 && !hasOpenReceipt && planned > 0 && unplanned <= 0) {
-      tags.push(renderTag('ok', 'Planned', 'All remaining open balance is assigned in the Planner.'));
+      tags.push(renderTag('ok', 'Planned', 'All remaining open balance is assigned to a Draft or Booked container.'));
     }
 
     return `
@@ -1571,7 +1329,10 @@
         ${po.synthetic ? `<div class="note bad-note">PO header missing in PurchPO. Vendor “${esc(po.vendorId || 'unknown')}” was inferred from the PO number; treat these values as incomplete.</div>` : ''}
         <div class="detail-grid">${headerGrid}</div>
 
-        <h3>Shipments</h3>
+        ${renderPoVendorConfirmation(po)}
+        ${renderPoContainers(po)}
+
+        <h3>Receipts</h3>
         ${po.receipts.length ? `
           <div class="sc">
             <table class="compact-table">
@@ -1596,7 +1357,7 @@
                       <td>${renderReceiptStatusTag(receipt)}</td>
                       <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
                       <td>${renderReceiptReceivedDate(receipt)}</td>
-                      <td><span class="mono">${esc(receipt.tracking || '—')}</span>${receipt.containerId ? `<br><span class="sub">Container ${esc(receipt.containerId)}</span>` : ''}</td>
+                      <td><a class="mono" href="#containers/${encodeURIComponent(receiptContainerKey(receipt))}" data-action="open-container:${attr(receiptContainerKey(receipt))}">${esc(normalizeTracking(receipt.tracking) || 'No tracking no.')}</a>${receipt.containerId ? `<br><span class="sub">Container ${esc(receipt.containerId)}</span>` : ''}</td>
                       <td>${esc(receipt.type || '—')}</td>
                       <td title="${attr(warehouse.title)}">${esc(warehouse.label)}</td>
                       <td>${esc(receipt.matchType || '—')}</td>
@@ -1661,675 +1422,7 @@
   }
 
   /* =========================================================================
-     8. Shipments
-     ========================================================================= */
-
-  function shipmentSearchText(receipt) {
-    if (receipt._shipmentSearch == null) {
-      receipt._shipmentSearch = [
-        receipt.invoiceNo,
-        receipt.matchPo,
-        receipt.vendorId,
-        receipt.tracking,
-        receipt.containerId,
-        receipt.groupLabel,
-        receipt.type,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-    }
-    return receipt._shipmentSearch;
-  }
-
-  function shipmentReceipts(ignoreStatus = false) {
-    const query = String(state.shipmentQuery || '').trim().toLowerCase();
-    return receiptsForFilter(true, ignoreStatus)
-      .filter((receipt) => !query || shipmentSearchText(receipt).includes(query));
-  }
-
-  function shipmentGroups() {
-    const groups = new Map();
-
-    shipmentReceipts().forEach((receipt) => {
-      const key = receipt.groupKey;
-      if (!groups.has(key)) {
-        groups.set(key, {
-          key,
-          label: receipt.groupLabel,
-          isContainer: Boolean(receipt.containerId),
-          receipts: [],
-        });
-      }
-      groups.get(key).receipts.push(receipt);
-    });
-
-    return Array.from(groups.values()).sort((a, b) => {
-      const aEta = a.receipts.map((row) => row.etaDate || '9999').sort()[0];
-      const bEta = b.receipts.map((row) => row.etaDate || '9999').sort()[0];
-      return aEta.localeCompare(bEta) || a.label.localeCompare(b.label);
-    });
-  }
-
-  function shipmentGroupStatus(group) {
-    const rank = {
-      Overdue: 5,
-      Unmatched: 4,
-      'No ETA': 3,
-      'In transit': 2,
-      'Invalid data': 1,
-      Received: 0,
-    };
-    return group.receipts.reduce((worst, receipt) => {
-      const status = getReceiptStatus(receipt);
-      return (rank[status] ?? 0) > (rank[worst] ?? 0) ? status : worst;
-    }, 'Received');
-  }
-
-  function renderShipmentKpis() {
-    const host = document.getElementById('shipment-kpis');
-    if (!host) return;
-
-    const receipts = shipmentReceipts(true);
-    const total = receipts.length;
-    const transit = receipts.filter((receipt) => getReceiptStatus(receipt) === 'In transit').length;
-    const overdue = receipts.filter((receipt) => getReceiptStatus(receipt) === 'Overdue').length;
-    const unmatched = receipts.filter((receipt) => getReceiptStatus(receipt) === 'Unmatched').length;
-    const received = receipts.filter((receipt) => getReceiptStatus(receipt) === 'Received').length;
-
-    const cards = [
-      ['', 'Receipts in view', `${formatNumber(received)} already received`, false, total],
-      ['In transit', 'On the way', 'Future ETA', false, transit],
-      ['Overdue', 'Past ETA', 'ETA has passed', true, overdue],
-      ['Unmatched', 'No matching PO', 'Cannot be tied to a PO', true, unmatched],
-    ];
-
-    host.innerHTML = cards.map(([status, label, note, hot, count]) => `
-      <button
-        class="card kp${hot ? ' hot' : ''}${state.shipmentStatus === status ? ' sel' : ''}"
-        data-action="ship-status:${attr(status)}"
-      >
-        <b>${formatNumber(count)}</b>
-        <span class="sub">${esc(label)}</span>
-        <span class="sub">${esc(note)}</span>
-      </button>`).join('');
-  }
-
-  function renderShipmentGroup(group) {
-    const expanded = state.expandedShipmentGroups.has(group.key);
-    const status = shipmentGroupStatus(group);
-    const etaValues = group.receipts.map((receipt) => receipt.etaDate).filter(Boolean).sort();
-    const poIds = new Set(group.receipts.map((receipt) => receipt.matchPo).filter(Boolean));
-    const vendors = Array.from(new Set(group.receipts.map((receipt) => receipt.vendorId).filter(Boolean)));
-    const etaLabel = etaValues.length
-      ? `${formatDate(etaValues[0])}${etaValues.length > 1 ? ` → ${formatDate(etaValues[etaValues.length - 1])}` : ''}`
-      : 'No ETA';
-    const receiptLabel = `${formatNumber(group.receipts.length)} receipt${group.receipts.length === 1 ? '' : 's'}`;
-    const poLabel = `${formatNumber(poIds.size)} PO${poIds.size === 1 ? '' : 's'}`;
-    const vendorLabel = vendors.length
-      ? ` · ${esc(vendors.slice(0, 2).join(', '))}${vendors.length > 2 ? ` +${vendors.length - 2}` : ''}`
-      : '';
-
-    return `
-      <div class="ship-group">
-        <button class="ship-group-head" data-action="toggle-ship-group:${attr(group.key)}" aria-expanded="${expanded}">
-          <span class="ship-group-name">
-            <b>${group.isContainer ? 'Container ' : 'Tracking '}${esc(group.label)}</b>
-            <span class="sub">${receiptLabel} · ${poLabel}${vendorLabel}</span>
-          </span>
-          <span class="ship-group-eta">${etaLabel}</span>
-          ${renderTag(tagVariantForStatus(status), receiptStatusLabel(status))}
-          <span class="ship-caret">${expanded ? '▾' : '▸'}</span>
-        </button>
-        ${expanded ? `
-          <div class="sc">
-            <table class="compact-table">
-              <thead>
-                <tr>
-                  <th>INVOICE</th>
-                  <th>PO</th>
-                  <th>VENDOR</th>
-                  <th>ETA</th>
-                  <th>RECEIVED</th>
-                  <th>STATUS</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${group.receipts.map((receipt) => {
-                  const warehouse = renderWarehouse(receipt);
-                  return `
-                    <tr>
-                      <td class="mono">${esc(receipt.invoiceNo)}<br><span class="sub">${esc(receipt.type || '—')} · ${esc(warehouse.label)}</span></td>
-                      <td>${receipt.matchPo ? `<a href="#orders" data-action="openpo:${attr(receipt.matchPo)}"><b>${esc(receipt.matchPo)}</b></a>` : '<span class="sub">—</span>'}</td>
-                      <td>${esc(receipt.vendorId || '—')}</td>
-                      <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
-                      <td>${renderReceiptReceivedDate(receipt, 'Not yet')}</td>
-                      <td>${renderReceiptStatusTag(receipt)}</td>
-                    </tr>`;
-                }).join('')}
-              </tbody>
-            </table>
-          </div>` : ''}
-      </div>`;
-  }
-
-  function updateShipmentList() {
-    const host = document.getElementById('shipment-list');
-    if (!host) return;
-
-    renderShipmentKpis();
-
-    const groups = shipmentGroups();
-    const pageSize = state.shipmentPageSize;
-    const pages = Math.max(1, Math.ceil(groups.length / pageSize));
-    state.shipmentPage = Math.min(Math.max(1, state.shipmentPage), pages);
-    const start = (state.shipmentPage - 1) * pageSize;
-    const pageGroups = groups.slice(start, start + pageSize);
-    const receiptsOnPage = pageGroups.reduce((sum, group) => sum + group.receipts.length, 0);
-    const receiptWord = receiptsOnPage === 1 ? 'receipt' : 'receipts';
-    const groupLabel = groups.length === 1 ? 'group' : 'groups';
-
-    host.innerHTML = `
-      <div class="row" style="margin-bottom:8px">
-        <span class="sub">${formatNumber(groups.length)} container/tracking ${groupLabel} · ${formatNumber(receiptsOnPage)} ${receiptWord} on this page</span>
-        <span class="row" style="gap:6px">
-          <button class="s" data-action="ship-expand-all"${pageGroups.length ? '' : ' disabled'}>Expand all</button>
-          <button class="s" data-action="ship-collapse-all"${state.expandedShipmentGroups.size ? '' : ' disabled'}>Collapse all</button>
-        </span>
-      </div>
-      ${pageGroups.length ? `
-        <div class="ship-groups">${pageGroups.map(renderShipmentGroup).join('')}</div>
-        <div class="row" style="margin-top:10px">
-          <span class="sub">Showing ${formatNumber(start + 1)}–${formatNumber(Math.min(groups.length, start + pageSize))} of ${formatNumber(groups.length)} ${groupLabel}</span>
-          <span class="row" style="gap:6px">
-            <button class="s" data-action="ship-page:1"${state.shipmentPage <= 1 ? ' disabled' : ''}>« First</button>
-            <button class="s" data-action="ship-page:${state.shipmentPage - 1}"${state.shipmentPage <= 1 ? ' disabled' : ''}>‹ Prev</button>
-            ${paginationButtons(pages, state.shipmentPage, 'ship-page')}
-            <button class="s" data-action="ship-page:${state.shipmentPage + 1}"${state.shipmentPage >= pages ? ' disabled' : ''}>Next ›</button>
-            <button class="s" data-action="ship-page:${pages}"${state.shipmentPage >= pages ? ' disabled' : ''}>Last »</button>
-          </span>
-        </div>` : `
-        <div class="card sub">No shipments match the current filters.</div>`}
-    `;
-  }
-
-  function renderShipments() {
-    const typeOptions = Array.from(new Set(receiptRows.map((receipt) => receipt.type).filter(Boolean)))
-      .sort()
-      .map((type) => `<option value="${attr(type)}"${state.shipmentType === type ? ' selected' : ''}>${esc(type)}</option>`)
-      .join('');
-
-    const statusOptions = RECEIPT_STATUSES
-      .map((status) => `<option value="${attr(status)}"${state.shipmentStatus === status ? ' selected' : ''}>${esc(receiptStatusLabel(status))}</option>`)
-      .join('');
-
-    return `
-      ${renderHeader(
-        'Shipments',
-        `Receipts grouped by container or tracking number. Click a group to see its receipts. Data as of ${AS_OF_LABEL}.`,
-        `<div class="row" style="gap:8px">
-          <span class="sub">${formatNumber(receiptRows.length)} receipts</span>
-          <button class="s" data-action="go:import">Import packing list</button>
-        </div>`
-      )}
-
-      <div class="grid" id="shipment-kpis"></div>
-
-      <div class="card row" style="justify-content:flex-start">
-        <input type="search" id="shipment-search" placeholder="Search invoice, PO, vendor or tracking" value="${attr(state.shipmentQuery)}" style="min-width:280px">
-        <select id="shipment-type">
-          <option value="">All receipt types</option>
-          ${typeOptions}
-        </select>
-        <select id="shipment-status">
-          <option value="">All statuses</option>
-          ${statusOptions}
-        </select>
-      </div>
-
-      <div id="shipment-list"></div>
-
-      <div class="card sub">
-        Warehouse codes from the export: “1” shows as WC and “3” as 1825. Warehouse “1825 (likely)” is inferred from a “-W” tracking suffix when the warehouse field is blank.
-        <details class="more"><summary>Why some shipments have no matching PO</summary>
-          A receipt can exist without a PO line that matches its invoice and item, or its PO may belong to the Other segment. Click a PO number to open it.
-        </details>
-      </div>`;
-  }
-
-  /* =========================================================================
-     9. Receive one receipt (simulated)
-     ========================================================================= */
-
-  function openReceiveReceipts() {
-    return receiptRows
-      .filter((receipt) => receipt.matchPo && !receipt.invalid && !isReceiptReceived(receipt) && receipt.poRef)
-      .filter((receipt) => poMatchesGlobal(receipt.poRef))
-      .sort((a, b) => (a.etaDate || '9999').localeCompare(b.etaDate || '9999'));
-  }
-
-  function renderReceive() {
-    const receipts = openReceiveReceipts();
-    if (!receipts.length) {
-      return `
-        ${renderHeader('Receive one receipt (simulated)', `No open matched receipts in the current filters. Data as of ${AS_OF_LABEL}.`)}
-        <div class="card">${renderTag('wn', 'Simulated import')} <span class="sub">There is no open matched receipt to receive in this filter.</span></div>`;
-    }
-
-    let selected = receipts.find((receipt) => String(receipt.id) === String(state.receiveReceiptId));
-    if (!selected) {
-      selected = receipts[0];
-      state.receiveReceiptId = String(selected.id);
-    }
-
-    const po = selected.poRef;
-    const summary = getPoSummary(po);
-    const lines = po.lines.filter((line) => openUnitsForLine(line) > 0);
-
-    return `
-      ${renderHeader(
-        'Receive one receipt (simulated)',
-        `The receipt export has no line quantities. This single-receipt path lets you edit the delivered quantities on one PO and updates only this browser session. For a whole container, use Import packing list. Data as of ${AS_OF_LABEL}.`,
-        renderTag('wn', 'Simulated import')
-      )}
-
-      <div class="card note">
-        <b>No line-level packing list exists in PurchReceipt.</b>
-        Choose an open matched receipt, edit the pre-filled quantities if the delivery is partial, then confirm. The in-memory balance changes immediately; nothing is written back to the CSV or Odoo.
-      </div>
-
-      <div class="card row" style="justify-content:flex-start">
-        <span class="sub">Need to process a whole container or tracking group at once?</span>
-        <button class="s" data-action="go:import">Import a multi-PO packing list</button>
-      </div>
-
-      <div class="card">
-        <label for="receive-receipt" class="field-label">Open matched receipt</label>
-        <select id="receive-receipt">
-          ${receipts.map((receipt) => `
-            <option value="${receipt.id}"${String(receipt.id) === String(selected.id) ? ' selected' : ''}>
-              ${esc(receipt.invoiceNo)} · ${esc(receipt.matchPo)} · ETA ${formatDate(receipt.etaDate)}
-            </option>
-          `).join('')}
-        </select>
-
-        <div class="detail-grid" style="margin-top:14px">
-          <div><div class="sub">Receipt</div><div class="mono">${esc(selected.invoiceNo)}</div></div>
-          <div><div class="sub">PO</div><div><b>${esc(po.po)}</b></div></div>
-          <div><div class="sub">Vendor</div><div>${esc(po.vendorId || '—')}</div></div>
-          <div><div class="sub">Buyer</div><div title="${attr(purchaserTitle(po.purchaser))}">${esc(po.buyer || '—')}</div></div>
-          <div><div class="sub">ETA</div><div>${formatDate(selected.etaDate)} <span class="sub">${esc(relativeEta(selected.etaDate))}</span></div></div>
-          <div><div class="sub">Tracking</div><div class="mono">${esc(selected.tracking || '—')}</div></div>
-          <div><div class="sub">Type</div><div>${esc(selected.type || '—')}</div></div>
-          <div><div class="sub">PO status</div><div>${renderStatusTag(summary.status)}</div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="row">
-          <h2>Open lines</h2>
-          <span class="sub">Pre-filled to the current balance. Edit any line for a partial receipt.</span>
-        </div>
-        ${lines.length ? `
-          <div class="sc">
-            <table class="compact-table receive-table">
-              <thead>
-                <tr>
-                  <th>ITEM</th>
-                  <th>DESCRIPTION</th>
-                  <th class="n">ORDERED</th>
-                  <th class="n">RECEIVED</th>
-                  <th class="n">BALANCE</th>
-                  <th class="n">RECEIVE NOW</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${lines.map((line) => {
-                  const balance = openUnitsForLine(line);
-                  return `
-                    <tr>
-                      <td class="mono">${esc(line.itemId || '—')}</td>
-                      <td>${esc(line.description || '—')}</td>
-                      <td class="n">${formatNumber(line.ordered)}</td>
-                      <td class="n">${formatNumber(receivedUnitsForLine(line))}</td>
-                      <td class="n">${formatNumber(balance)}</td>
-                      <td class="n">
-                        <input class="qty-input" type="number" min="0" max="${balance}" step="1" value="${balance}" data-receive-line="${line.id}">
-                      </td>
-                    </tr>`;
-                }).join('')}
-              </tbody>
-            </table>
-          </div>
-          <div class="row" style="margin-top:12px">
-            <span class="sub">After confirmation, a remaining balance appears in Follow-ups — either as an already-planned remainder or as “At risk — not fully planned”.</span>
-            <button class="p" data-action="confirm-receive">Confirm simulated receipt</button>
-          </div>` : '<div class="sub">This PO has no open lines.</div>'}
-      </div>`;
-  }
-
-  function confirmReceive() {
-    const receipt = receiptRows.find((row) => String(row.id) === String(state.receiveReceiptId));
-    if (!receipt || !receipt.poRef) return;
-
-    const quantities = {};
-    document.querySelectorAll('[data-receive-line]').forEach((input) => {
-      const lineId = Number(input.dataset.receiveLine);
-      const line = lineById.get(lineId);
-      if (!line) return;
-      const max = openUnitsForLine(line);
-      const quantity = Math.max(0, Math.min(max, Number(input.value) || 0));
-      if (quantity > 0) {
-        quantities[lineId] = quantity;
-        state.simulatedLineQty[lineId] = (state.simulatedLineQty[lineId] || 0) + quantity;
-      }
-    });
-
-    state.simulatedReceipts[receipt.id] = {
-      receivedDate: AS_OF,
-      quantities,
-    };
-
-    clearSummaryCache();
-    const summary = getPoSummary(receipt.poRef);
-    state.receiveReceiptId = '';
-    render();
-    showToast(
-      `Simulated receipt ${receipt.invoiceNo} confirmed. ${summary.status === 'Unshipped balance'
-        ? 'Remaining balance is now an open balance with no shipment.'
-        : 'Balances updated in this session.'}`
-    );
-  }
-
-  /* =========================================================================
-     9b. Receipt import (simulated)
-     ========================================================================= */
-
-  function importSampleDocuments() {
-    const groups = new Map();
-
-    receiptRows.forEach((receipt) => {
-      if (!receipt.matchPo || !receipt.poRef || receipt.invalid) return;
-      const saved = state.importPreviews[receipt.groupKey];
-      if (isReceiptReceived(receipt) && !(saved && saved.applied)) return;
-
-      if (!groups.has(receipt.groupKey)) {
-        groups.set(receipt.groupKey, {
-          key: receipt.groupKey,
-          label: receipt.groupLabel,
-          isContainer: Boolean(receipt.containerId),
-          receipts: [],
-        });
-      }
-      groups.get(receipt.groupKey).receipts.push(receipt);
-    });
-
-    const documents = [];
-    groups.forEach((group) => {
-      const pos = Array.from(new Set(group.receipts.map((receipt) => receipt.matchPo)))
-        .map((poNumber) => poById.get(poNumber))
-        .filter(Boolean);
-      if (pos.length < 4 || pos.length > 6) return;
-
-      const openLines = pos.reduce(
-        (sum, po) => sum + po.lines.filter((line) => !line.isCheckData && openUnitsForLine(line) > 0).length,
-        0
-      );
-      const posWithOpen = pos.filter(
-        (po) => po.lines.some((line) => !line.isCheckData && openUnitsForLine(line) > 0)
-      ).length;
-      const openUnits = pos.reduce(
-        (sum, po) => sum + po.lines.reduce(
-          (lineSum, line) => lineSum + (line.isCheckData ? 0 : openUnitsForLine(line)),
-          0
-        ),
-        0
-      );
-      const clearsOpenReceipts = pos.filter((po) => {
-        if (!po.lines.some((line) => !line.isCheckData && openUnitsForLine(line) > 0)) return false;
-        const openReceipts = po.receipts.filter(
-          (receipt) => !receipt.invalid && !isReceiptReceived(receipt)
-        );
-        return openReceipts.length > 0 && openReceipts.every((receipt) => receipt.groupKey === group.key);
-      }).length;
-      const saved = state.importPreviews[group.key];
-      if (openLines > 30) return;
-      if (openLines < 4 && !(saved && saved.applied)) return;
-      if (openLines <= 0 && !(saved && saved.applied)) return;
-
-      documents.push({
-        key: group.key,
-        label: group.label,
-        isContainer: group.isContainer,
-        receipts: group.receipts,
-        pos,
-        openLines,
-        openUnits,
-        posWithOpen,
-        clearsOpenReceipts,
-      });
-    });
-
-    documents.sort((a, b) =>
-      b.clearsOpenReceipts - a.clearsOpenReceipts ||
-      b.posWithOpen - a.posWithOpen ||
-      b.openUnits - a.openUnits ||
-      b.openLines - a.openLines ||
-      b.pos.length - a.pos.length ||
-      a.label.localeCompare(b.label)
-    );
-
-    return documents;
-  }
-
-  function sampleImportQty(line) {
-    const open = openUnitsForLine(line);
-    if (open <= 0) return 0;
-
-    const carton = line.boxQty > 0 ? line.boxQty : 1;
-    let qty = Math.floor((open * 0.7) / carton) * carton;
-    if (qty <= 0) qty = Math.min(open, carton);
-    qty = Math.max(1, Math.min(open, qty));
-    return qty;
-  }
-
-  function buildImportPreview(document) {
-    const rows = document.pos.map((po) => {
-      const receipts = document.receipts.filter((receipt) => receipt.matchPo === po.po);
-      const entries = po.lines
-        .filter((line) => !line.isCheckData)
-        .map((line) => {
-          const before = openUnitsForLine(line);
-          const qty = sampleImportQty(line);
-          return { line, qty, before, after: Math.max(0, before - qty) };
-        })
-        .filter((entry) => entry.qty > 0);
-
-      const beforeUnits = entries.reduce((sum, entry) => sum + entry.before, 0);
-      const units = entries.reduce((sum, entry) => sum + entry.qty, 0);
-
-      return {
-        po,
-        receipts,
-        entries,
-        beforeUnits,
-        units,
-        afterUnits: Math.max(0, beforeUnits - units),
-      };
-    }).sort((a, b) => a.po.po.localeCompare(b.po.po));
-
-    const vendors = Array.from(new Set(rows.map((row) => row.po.vendorId).filter(Boolean))).sort();
-
-    return {
-      key: document.key,
-      label: document.label,
-      isContainer: document.isContainer,
-      receipts: document.receipts,
-      receiptCount: document.receipts.length,
-      pos: rows,
-      poCount: rows.length,
-      vendors,
-      totalLines: rows.reduce((sum, row) => sum + row.entries.length, 0),
-      totalUnits: rows.reduce((sum, row) => sum + row.units, 0),
-      applied: false,
-    };
-  }
-
-  function getImportPreview(documents) {
-    const stored = state.importGroupKey ? state.importPreviews[state.importGroupKey] : null;
-    if (stored && stored.applied) return stored;
-
-    let document = documents.find((row) => row.key === state.importGroupKey);
-    if (!document && state.importPreview) {
-      document = documents.find((row) => row.key === state.importPreview.key);
-    }
-    if (!document) document = documents[0];
-    if (!document) return null;
-
-    const preview = buildImportPreview(document);
-    state.importGroupKey = preview.key;
-    state.importPreview = preview;
-    state.importPreviews[preview.key] = preview;
-    return preview;
-  }
-
-  function applyImport() {
-    const preview = state.importPreview;
-    if (!preview || preview.applied) return;
-
-    preview.pos.forEach((row) => {
-      const quantities = {};
-      row.entries.forEach((entry) => {
-        if (entry.qty <= 0) return;
-        state.simulatedLineQty[entry.line.id] = (state.simulatedLineQty[entry.line.id] || 0) + entry.qty;
-        quantities[entry.line.id] = entry.qty;
-      });
-      row.receipts.forEach((receipt) => {
-        state.simulatedReceipts[receipt.id] = {
-          receivedDate: AS_OF,
-          quantities,
-        };
-      });
-    });
-
-    preview.applied = true;
-    state.importPreviews[preview.key] = preview;
-    clearSummaryCache();
-    render();
-    showToast(
-      `Sample packing list applied — ${formatNumber(preview.totalUnits)} units across ${formatNumber(preview.poCount)} POs. Remaining balances are now tracked in this session.`
-    );
-  }
-
-  function renderImport() {
-    const documents = importSampleDocuments();
-    const preview = getImportPreview(documents);
-
-    const header = renderHeader('Import packing list');
-
-    if (!preview) {
-      return `
-        ${header}
-        <div class="card sub">No sample packing list found.</div>`;
-    }
-
-    const options = documents.map((document) => {
-      const savedPreview = state.importPreviews[document.key];
-      const documentName = `${document.isContainer ? 'Container' : 'Tracking'} ${document.label} · ${document.pos.length} POs`;
-      return {
-        key: document.key,
-        label: savedPreview && savedPreview.applied
-          ? `${documentName} · applied`
-          : `${documentName} · ${formatNumber(document.openLines)} open lines · ${formatNumber(document.openUnits)} units`,
-      };
-    });
-    if (!options.some((option) => option.key === preview.key)) {
-      options.unshift({
-        key: preview.key,
-        label: `${preview.isContainer ? 'Container' : 'Tracking'} ${preview.label} · ${formatNumber(preview.poCount)} POs · applied`,
-      });
-    }
-
-    const lineRows = preview.pos.flatMap((row) => {
-      const matchType = row.receipts[0] ? row.receipts[0].matchType || '—' : '—';
-      const listQty = new Map(row.entries.map((entry) => [entry.line.id, entry.qty]));
-
-      return row.po.lines.map((line) => `
-        <tr>
-          <td><a href="#orders" data-action="openpo:${attr(row.po.po)}"><b>${esc(row.po.po)}</b></a></td>
-          <td>${esc(row.po.vendorId || '—')}</td>
-          <td class="mono">${esc(line.itemId || '—')}</td>
-          <td>${esc(line.description || '—')}</td>
-          <td class="n">${formatNumber(line.ordered)}</td>
-          <td class="n">${formatNumber(openUnitsForLine(line))}</td>
-          <td class="n"><b>${formatNumber(listQty.get(line.id) || 0)}</b></td>
-          <td>${esc(matchType)}</td>
-        </tr>`);
-    }).join('');
-
-    return `
-      ${header}
-
-      <div class="card">
-        <div class="row" style="align-items:flex-start">
-          <div style="flex:1 1 320px">
-            <label class="field-label" for="import-document">Sample packing list</label>
-            <select id="import-document" style="width:100%">
-              ${options.map((option) => `<option value="${attr(option.key)}"${option.key === preview.key ? ' selected' : ''}>${esc(option.label)}</option>`).join('')}
-            </select>
-          </div>
-          ${preview.applied ? renderTag('ok', 'Applied in this session') : renderTag('wn', 'Ready to apply')}
-        </div>
-
-        <div class="detail-grid" style="margin-top:14px">
-          <div><div class="sub">Document</div><div class="mono">${esc(preview.label)}</div></div>
-          <div><div class="sub">Type</div><div>${preview.isContainer ? 'Container' : 'Tracking number'}</div></div>
-          <div><div class="sub">Receipts</div><div>${formatNumber(preview.receiptCount)}</div></div>
-          <div><div class="sub">POs in document</div><div><b>${formatNumber(preview.poCount)}</b></div></div>
-          <div><div class="sub">Vendors</div><div>${esc(preview.vendors.join(', ') || '—')}</div></div>
-          <div><div class="sub">Lines on this list</div><div>${formatNumber(preview.totalLines)}</div></div>
-          <div><div class="sub">Units on this list</div><div><b>${formatNumber(preview.totalUnits)}</b></div></div>
-        </div>
-      </div>
-
-      ${preview.totalLines ? `
-        <div class="card">
-          <div class="row">
-            <h2>Packing list lines</h2>
-            <span class="sub">${formatNumber(preview.totalLines)} lines on list · ${formatNumber(preview.totalUnits)} units</span>
-          </div>
-          <div class="sc" style="margin-top:10px">
-            <table>
-              <thead>
-                <tr>
-                  <th>PO</th>
-                  <th>VENDOR</th>
-                  <th>ITEM</th>
-                  <th>DESCRIPTION</th>
-                  <th class="n">TOTAL QTY</th>
-                  <th class="n">BALANCE</th>
-                  <th class="n">QTY ON LIST</th>
-                  <th>MATCH</th>
-                </tr>
-              </thead>
-              <tbody>${lineRows}</tbody>
-            </table>
-          </div>
-          <div class="row" style="margin-top:12px; justify-content:flex-end">
-            <button class="p" data-action="apply-import"${preview.applied ? ' disabled' : ''}>${preview.applied ? 'Applied' : 'Apply sample import'}</button>
-          </div>
-        </div>` : ''}
-
-      ${preview.applied ? `
-        <div class="card row" style="justify-content:flex-start">
-          <button class="s" data-action="go:planner">Open Planner</button>
-          <button class="s" data-action="go:followup">Open Follow-ups</button>
-        </div>` : ''}
-    `;
-  }
-
-  /* =========================================================================
-     10. Planner
+     10. Container planning
      ========================================================================= */
 
   function plannerItems() {
@@ -2410,27 +1503,40 @@
   }
 
   function addPlannerContainer(value) {
-    const resolved = resolvePlannerContainer(value);
+    const typed = String(value || '').trim();
+    const resolved = resolvePlannerContainer(typed);
     if (!resolved) {
       showToast('Type a container (for example 40HC) before adding.');
       document.getElementById('planner-container-type')?.focus();
       return;
     }
 
+    const compact = typed.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const typeKey = Object.keys(CONTAINER_TYPES).find((key) => compact.includes(key)) || '40HC';
+    const type = CONTAINER_TYPES[typeKey].label;
+    const defaultName = `Container ${state.plannerContainerSequence + 1}`;
+    const name = !typed || Object.keys(CONTAINER_TYPES).some((key) => typed.toLowerCase() === key.toLowerCase())
+      ? defaultName
+      : typed;
+
     const sequence = state.plannerContainerSequence + 1;
     state.plannerContainerSequence = sequence;
     state.plannerContainers.push({
       id: `C-${sequence}`,
-      type: resolved.label,
-      capacity: resolved.capacity,
+      name,
+      type,
+      capacity: CONTAINER_TYPES[typeKey].capacity,
       status: 'draft',
       sailingDate: '',
       port: '',
+      etaDate: '',
       arrivedDate: '',
       assignments: [],
     });
+    clearSummaryCache();
+    persistDemoState();
     render();
-    showToast(`${resolved.label} container C-${sequence} added (${resolved.capacity} CBM).`);
+    showToast(`${name} added (${type}, ${CONTAINER_TYPES[typeKey].capacity} CBM).`);
   }
 
   function removePlannerContainer(containerId) {
@@ -2442,6 +1548,8 @@
     }
     state.plannerContainers = state.plannerContainers.filter((row) => row.id !== containerId);
     syncPlannerAssigned();
+    clearSummaryCache();
+    persistDemoState();
     render();
   }
 
@@ -2457,6 +1565,8 @@
     if (!assignment) return;
     container.assignments.splice(index, 1);
     syncPlannerAssigned();
+    clearSummaryCache();
+    persistDemoState();
     render();
   }
 
@@ -2470,6 +1580,8 @@
     state.plannerContainers = state.plannerContainers.filter((container) => !containerIsEditable(container));
     state.plannerSelectedLineId = null;
     syncPlannerAssigned();
+    clearSummaryCache();
+    persistDemoState();
     render();
     showToast(
       `Cleared ${formatNumber(removedBlocks)} draft/booked block${removedBlocks === 1 ? '' : 's'}. ` +
@@ -2485,6 +1597,10 @@
     if (container) {
       if (dataset.containerSailing) container.sailingDate = event.target.value;
       if (dataset.containerPort) container.port = event.target.value;
+      if (event.type === 'change') {
+        clearSummaryCache();
+        persistDemoState();
+      }
     }
     return true;
   }
@@ -2516,8 +1632,10 @@
       return;
     }
     container.status = 'booked';
+    clearSummaryCache();
+    persistDemoState();
     render();
-    showToast(`${container.id} marked booked${container.sailingDate ? ` · sailing ${formatDate(container.sailingDate)}` : ''}.`);
+    showToast(`${container.name} marked booked${container.sailingDate ? ` · sailing ${formatDate(container.sailingDate)}` : ''}.`);
   }
 
   function markContainerShipped(containerId) {
@@ -2536,10 +1654,11 @@
     container.status = 'shipped';
     syncPlannerAssigned();
     clearSummaryCache();
+    persistDemoState();
     render();
     const units = containerUnits(container);
     showToast(
-      `${container.id} marked shipped — ${formatNumber(units)} units moved to In transit` +
+      `${container.name} marked shipped — ${formatNumber(units)} units moved to On the water` +
       `${container.sailingDate ? ` (sailing ${formatDate(container.sailingDate)})` : ''}.`
     );
   }
@@ -2565,9 +1684,10 @@
     });
     syncPlannerAssigned();
     clearSummaryCache();
+    persistDemoState();
     render();
     showToast(
-      `${container.id} marked arrived — ${formatNumber(units)} units added to received balances in this session.`
+      `${container.name} marked arrived — ${formatNumber(units)} units added to received balances.`
     );
   }
 
@@ -2673,12 +1793,22 @@
     const blockNumber = state.plannerContainers
       .flatMap((row) => row.assignments)
       .filter((assignment) => assignment.lineId === line.id).length + 1;
-    container.assignments.push({ lineId: line.id, units, cbm, carton, block: `B${blockNumber}` });
+    container.assignments.push({
+      lineId: line.id,
+      units,
+      plannedUnits: units,
+      cbm,
+      cbmPerUnit,
+      carton,
+      block: `B${blockNumber}`,
+    });
     syncPlannerAssigned();
+    clearSummaryCache();
+    persistDemoState();
     state.plannerSelectedLineId = null;
     state.plannerPendingAssignment = null;
     render();
-    showToast(`${formatNumber(units)} units of ${line.itemId} planned into ${container.id} as block B${blockNumber}${cbm == null ? ' — CBM missing' : ''}.`);
+    showToast(`${formatNumber(units)} units of ${line.itemId} planned into ${container.name || container.id} as block B${blockNumber}${cbm == null ? ' — CBM missing' : ''}.`);
     return true;
   }
 
@@ -2777,60 +1907,869 @@
       </div>`;
   }
 
-  function renderPlanner() {
-    const allItems = plannerItems();
-    const items = filterPlannerItems(allItems);
+  /* =========================================================================
+     10b. Containers
+     ========================================================================= */
 
-    const missingCbmAssignments = state.plannerContainers
-      .reduce((sum, container) => sum + plannerMissingCbm(container), 0);
+  function realContainerGroups() {
+    const groups = new Map();
 
-    const typeOptions = Object.entries(CONTAINER_TYPES)
-      .map(([key, value]) => `<option value="${key}">${value.label} · ${value.capacity} CBM</option>`)
+    receiptRows.forEach((receipt) => {
+      const key = receiptContainerKey(receipt);
+      if (!groups.has(key)) {
+        const tracking = normalizeTracking(receipt.tracking);
+        groups.set(key, {
+          key,
+          tracking,
+          label: tracking || 'No tracking no.',
+          isContainer: isContainerShaped(tracking),
+          isBlank: !tracking,
+          receipts: [],
+        });
+      }
+      groups.get(key).receipts.push(receipt);
+    });
+
+    return Array.from(groups.values()).sort((a, b) => {
+      const aEta = realGroupEta(a) || '9999-12-31';
+      const bEta = realGroupEta(b) || '9999-12-31';
+      return aEta.localeCompare(bEta) || a.label.localeCompare(b.label);
+    });
+  }
+
+  function realGroupEta(group) {
+    return group.receipts
+      .map((receipt) => receipt.etaDate)
+      .filter(Boolean)
+      .sort()[0] || '';
+  }
+
+  function realGroupReceived(group) {
+    return group.receipts.length > 0 && group.receipts.every((receipt) => isReceiptReceived(receipt));
+  }
+
+  function realGroupStatus(group) {
+    const rank = {
+      Overdue: 5,
+      Unmatched: 4,
+      'No ETA': 3,
+      'In transit': 2,
+      'Invalid data': 1,
+      Received: 0,
+    };
+    return group.receipts.reduce((worst, receipt) => {
+      const status = getReceiptStatus(receipt);
+      return (rank[status] ?? 0) > (rank[worst] ?? 0) ? status : worst;
+    }, 'Received');
+  }
+
+  function realGroupPos(group) {
+    return Array.from(new Set(group.receipts.map((receipt) => receipt.matchPo).filter(Boolean)))
+      .map((poNumber) => poById.get(poNumber))
+      .filter(Boolean);
+  }
+
+  function realGroupVendors(group) {
+    return Array.from(new Set(group.receipts.map((receipt) => receipt.vendorId).filter(Boolean))).sort();
+  }
+
+  function plannerContainerPos(container) {
+    const seen = new Set();
+    const rows = [];
+    container.assignments.forEach((assignment) => {
+      const line = lineById.get(assignment.lineId);
+      const po = line && line.poRef;
+      if (!po || seen.has(po.po)) return;
+      seen.add(po.po);
+      rows.push(po);
+    });
+    return rows.sort((a, b) => a.po.localeCompare(b.po));
+  }
+
+  function plannerContainerVendors(container) {
+    return Array.from(new Set(plannerContainerPos(container).map((po) => po.vendorId).filter(Boolean))).sort();
+  }
+
+  function realGroupSearchText(group) {
+    return [
+      group.key,
+      group.label,
+      ...group.receipts.flatMap((receipt) => [
+        receipt.invoiceNo,
+        receipt.matchPo,
+        receipt.vendorId,
+        receipt.type,
+      ]),
+    ].filter(Boolean).join(' ').toLowerCase();
+  }
+
+  function plannerContainerSearchText(container) {
+    return [
+      container.id,
+      container.name,
+      container.type,
+      container.port,
+      ...plannerContainerVendors(container),
+      ...plannerContainerPos(container).map((po) => po.po),
+    ].filter(Boolean).join(' ').toLowerCase();
+  }
+
+  function containerViewCounts() {
+    const groups = realContainerGroups();
+    return {
+      plan: state.plannerContainers.filter((container) => containerIsEditable(container)).length,
+      water: state.plannerContainers.filter((container) => containerStatusKey(container) === 'shipped').length
+        + groups.filter((group) => !group.isBlank && !realGroupReceived(group)).length,
+      arrived: state.plannerContainers.filter((container) => containerStatusKey(container) === 'arrived').length
+        + groups.filter((group) => !group.isBlank && realGroupReceived(group)).length,
+    };
+  }
+
+  function containerRecordsForView(view) {
+    const rows = [];
+    if (view === 'plan') {
+      state.plannerContainers
+        .filter((container) => containerIsEditable(container))
+        .forEach((container) => rows.push({ kind: 'planner', key: container.id, container }));
+      return rows;
+    }
+
+    state.plannerContainers
+      .filter((container) => containerStatusKey(container) === (view === 'arrived' ? 'arrived' : 'shipped'))
+      .forEach((container) => rows.push({ kind: 'planner', key: container.id, container }));
+
+    realContainerGroups()
+      .filter((group) => !group.isBlank && (view === 'arrived' ? realGroupReceived(group) : !realGroupReceived(group)))
+      .forEach((group) => rows.push({ kind: 'real', key: group.key, group }));
+
+    return rows;
+  }
+
+  function findContainerRecord(key) {
+    const decoded = decodeURIComponent(String(key || ''));
+    const container = state.plannerContainers.find((row) => row.id === decoded);
+    if (container) return { kind: 'planner', key: container.id, container };
+    const normalized = normalizeTracking(decoded);
+    const group = realContainerGroups().find((row) =>
+      row.key === decoded || row.label === decoded || (normalized && row.tracking === normalized));
+    if (group) return { kind: 'real', key: group.key, group };
+    return null;
+  }
+
+  function containerRecordLabel(record) {
+    if (record.kind === 'planner') return record.container.name || record.container.id;
+    return record.group.isContainer ? `Container ${record.group.label}` : `Tracking no. ${record.group.label}`;
+  }
+
+  function containerRecordHeaderLabel(record) {
+    if (record.kind === 'planner') return 'Container ID';
+    return record.group.isContainer ? 'Container' : 'Tracking no.';
+  }
+
+  function containerRecordType(record) {
+    if (record.kind === 'planner') return record.container.type;
+    return Array.from(new Set(record.group.receipts.map((receipt) => receipt.type).filter(Boolean))).join(', ') || '—';
+  }
+
+  function containerRecordVendors(record) {
+    return record.kind === 'planner' ? plannerContainerVendors(record.container) : realGroupVendors(record.group);
+  }
+
+  function containerRecordPos(record) {
+    return record.kind === 'planner' ? plannerContainerPos(record.container) : realGroupPos(record.group);
+  }
+
+  function containerRecordWarehouse(record) {
+    if (record.kind === 'planner') return '';
+    const receipt = record.group.receipts.find((row) => row.warehouse) || record.group.receipts[0];
+    return receipt ? renderWarehouse(receipt).label : '';
+  }
+
+  function containerRecordPort(record) {
+    if (record.kind === 'planner') return record.container.port || '';
+    const ports = Array.from(new Set(containerRecordPos(record)
+      .map((po) => po.port || po.fob)
+      .filter(Boolean)));
+    return ports.join(', ');
+  }
+
+  function inferredVendorDetails(record) {
+    if (record.kind === 'planner') {
+      const container = record.container;
+      return {
+        tracking: container.name || container.id,
+        invoice: '',
+        vessel: '',
+        etd: container.sailingDate || '',
+        eta: container.etaDate || '',
+        port: container.port || '',
+        warehouse: '',
+        cartons: null,
+        grossWeight: null,
+        cbm: Number(plannerUsedCbm(container).toFixed(2)),
+        status: CONTAINER_STATUSES[containerStatusKey(container)].label,
+        source: '',
+        contact: '',
+        notes: '',
+      };
+    }
+
+    const group = record.group;
+    return {
+      tracking: group.tracking || '',
+      invoice: Array.from(new Set(group.receipts.map((receipt) => receipt.invoiceNo).filter(Boolean))).join(', '),
+      vessel: '',
+      etd: '',
+      eta: realGroupEta(group),
+      port: containerRecordPort(record),
+      warehouse: containerRecordWarehouse(record),
+      cartons: null,
+      grossWeight: null,
+      cbm: null,
+      status: receiptStatusLabel(realGroupStatus(group)),
+      source: '',
+      contact: '',
+      notes: '',
+    };
+  }
+
+  function vendorDetailsFor(record) {
+    const saved = state.vendorDetails[record.key];
+    return Object.assign(inferredVendorDetails(record), saved && typeof saved === 'object' ? saved : {});
+  }
+
+  function containerNextAction(record) {
+    if (record.kind === 'planner') {
+      const container = record.container;
+      const key = containerStatusKey(container);
+      if (key === 'draft') {
+        return `<button class="p" data-action="book-container:${attr(container.id)}">Mark booked</button>`;
+      }
+      if (key === 'booked') {
+        return `<button class="p" data-action="confirm-ship-as-planned:${attr(container.id)}">Shipped as planned</button>`;
+      }
+      if (key === 'shipped') {
+        return `<button class="p" data-action="arrive-container:${attr(container.id)}">Mark arrived</button>`;
+      }
+      return '<span class="tag ok">Arrived</span>';
+    }
+
+    if (!realGroupReceived(record.group)) {
+      return `<button class="p" data-action="arrive-real:${attr(record.key)}">Mark arrived</button>`;
+    }
+    return '<span class="tag ok">Arrived</span>';
+  }
+
+  function renderContainerStepper(record) {
+    const statusKey = record.kind === 'planner'
+      ? containerStatusKey(record.container)
+      : (realGroupReceived(record.group) ? 'arrived' : 'shipped');
+    const current = ['draft', 'booked', 'shipped', 'arrived'].indexOf(statusKey);
+    const labels = ['Draft', 'Booked', 'Shipped', 'Arrived'];
+    return `
+      <div class="container-stepper" aria-label="Container status ${attr(labels[current])}">
+        ${labels.map((label, index) => `
+          <span class="container-step${index < current ? ' done' : ''}${index === current ? ' current' : ''}">
+            <i>${index < current ? '✓' : index + 1}</i>${esc(label)}
+          </span>`).join('')}
+      </div>`;
+  }
+
+  function renderContainerDetailHeader(record) {
+    const details = vendorDetailsFor(record);
+    const vendors = containerRecordVendors(record);
+    const pos = containerRecordPos(record);
+    const sailing = details.etd || (record.kind === 'planner' ? record.container.sailingDate : '');
+    const trackingTag = record.kind === 'real' && !record.group.isContainer
+      ? renderTag('wn', 'LCL / carrier reference', 'This receipt export value is not a standard container number.')
+      : '';
+    const nameField = record.kind === 'planner'
+      ? `
+        <label class="container-name-field">
+          <span class="field-label">Container ID</span>
+          <input type="text" data-container-name="${attr(record.container.id)}" value="${attr(record.container.name)}">
+        </label>`
+      : `
+        <div>
+          <div class="sub">${esc(containerRecordHeaderLabel(record))}</div>
+          <div class="container-id-value"><b class="mono">${esc(record.group.label)}</b> ${trackingTag}</div>
+        </div>`;
+
+    return `
+      <div class="container-detail-header">
+        <div class="row">
+          <div>
+            <div class="sub">${record.kind === 'planner' ? 'Planned container' : 'Shipment record'}</div>
+            <h2>${esc(containerRecordLabel(record))}</h2>
+          </div>
+          <div class="row container-detail-actions">
+            ${containerNextAction(record)}
+            <button class="s" data-action="close-container">Close</button>
+          </div>
+        </div>
+
+        <div class="detail-grid container-detail-grid">
+          <div>${nameField}</div>
+          <div><div class="sub">Type</div><div>${esc(containerRecordType(record))}</div></div>
+          <div><div class="sub">Vendors</div><div>${formatNumber(vendors.length)}${vendors.length ? `<div class="sub">${esc(vendors.join(', '))}</div>` : ''}</div></div>
+          <div><div class="sub">POs</div><div>${formatNumber(pos.length)}${pos.length ? `<div class="sub">${esc(pos.map((po) => po.po).join(', '))}</div>` : ''}</div></div>
+          <div><div class="sub">Port</div><div>${esc(details.port || '—')}</div></div>
+          <div><div class="sub">Sailing date</div><div>${sailing ? formatDate(sailing) : '—'}</div></div>
+          <div><div class="sub">ETA</div><div>${details.eta ? `${formatDate(details.eta)} <span class="sub">${esc(relativeEta(details.eta))}</span>` : '—'}</div></div>
+          <div><div class="sub">Warehouse</div><div>${esc(details.warehouse || '—')}</div></div>
+        </div>
+
+        ${renderContainerStepper(record)}
+      </div>`;
+  }
+
+  function plannerAssignmentSummary(container) {
+    const rows = new Map();
+
+    container.assignments.forEach((assignment) => {
+      const line = lineById.get(assignment.lineId);
+      if (!line) return;
+      if (!rows.has(line.id)) {
+        rows.set(line.id, {
+          line,
+          po: line.poRef,
+          units: 0,
+          plannedUnits: 0,
+          cbm: 0,
+          blocks: [],
+        });
+      }
+      const row = rows.get(line.id);
+      row.units += assignment.units;
+      row.plannedUnits += assignment.plannedUnits == null ? assignment.units : assignment.plannedUnits;
+      row.cbm += assignment.cbm || 0;
+      row.blocks.push(assignment.block || 'B1');
+    });
+
+    const status = containerStatusKey(container);
+    const result = Array.from(rows.values()).map((row) => {
+      const open = openUnitsForLine(row.line);
+      const balanceAfter = status === 'arrived' ? open : Math.max(0, open - row.units);
+      let otherPlanning = plannedUnitsForLine(row.line) + shippedUnitsForLine(row.line);
+      if (containerIsEditable(container) || status === 'shipped') otherPlanning -= row.units;
+      otherPlanning = Math.max(0, otherPlanning);
+      const shortfall = Math.max(0, row.plannedUnits - row.units);
+      const unplanned = unplannedUnitsForLine(row.line);
+      let resultLabel = 'Not planned';
+      let resultVariant = 'wn';
+      if (shortfall > 0) {
+        resultLabel = `Short by ${formatNumber(shortfall)}`;
+        resultVariant = 'bad';
+      } else if (balanceAfter <= 0) {
+        resultLabel = 'Done';
+        resultVariant = 'ok';
+      } else if (otherPlanning > 0) {
+        resultLabel = 'Balance planned elsewhere';
+        resultVariant = 'info';
+      }
+      return {
+        ...row,
+        open,
+        balanceAfter,
+        shortfall,
+        unplanned,
+        resultLabel,
+        resultVariant,
+      };
+    }).sort((a, b) => {
+      const aPo = a.po ? a.po.po : '';
+      const bPo = b.po ? b.po.po : '';
+      return aPo.localeCompare(bPo) || a.line.itemId.localeCompare(b.line.itemId);
+    });
+
+    return {
+      rows: result,
+      poCount: new Set(result.map((row) => row.po && row.po.po).filter(Boolean)).size,
+      lineCount: result.length,
+      balanceLeft: result.filter((row) => row.balanceAfter > 0).length,
+      notPlanned: result.filter((row) => row.resultLabel === 'Not planned').length,
+    };
+  }
+
+  function renderShippedLineEditor(container, row) {
+    const editKey = `${container.id}:${row.line.id}`;
+    if (state.shippingLineEdit !== editKey) return '';
+    return `
+      <div class="shipped-line-editor">
+        <label class="field-label" for="shipped-line-qty">Actually shipped</label>
+        <div class="row">
+          <input id="shipped-line-qty" class="qty-input" type="number" min="0" max="${row.plannedUnits}" step="1" value="${row.units}" data-shipped-line-input>
+          <button class="p s" data-action="save-shipped-line:${attr(container.id)}:${row.line.id}">Save</button>
+          <button class="s" data-action="cancel-shipped-line">Cancel</button>
+        </div>
+        <div class="sub">Planned ${formatNumber(row.plannedUnits)}. Any shortfall returns to the PO as unplanned.</div>
+      </div>`;
+  }
+
+  function renderPlannerContainerContents(container) {
+    const summary = plannerAssignmentSummary(container);
+    const statusKey = containerStatusKey(container);
+    const canEditShipped = statusKey === 'booked' || statusKey === 'shipped';
+
+    return `
+      <section class="container-detail-section">
+        <div class="row">
+          <div>
+            <h3>Contents</h3>
+            <div class="sub">${formatNumber(summary.poCount)} POs, ${formatNumber(summary.lineCount)} lines, ${formatNumber(summary.balanceLeft)} with balance left, ${formatNumber(summary.notPlanned)} not planned.</div>
+          </div>
+          ${statusKey === 'booked' ? '<span class="tag wn">Booked · confirm shipment when ready</span>' : ''}
+        </div>
+        ${summary.rows.length ? `
+          <div class="sc container-contents-scroll">
+            <table class="compact-table container-contents-table">
+              <thead>
+                <tr>
+                  <th>VENDOR</th>
+                  <th>PO</th>
+                  <th>ITEM</th>
+                  <th class="n">ORDERED</th>
+                  <th class="n">IN THIS CONTAINER</th>
+                  <th class="n">BALANCE AFTER</th>
+                  <th>RESULT</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${summary.rows.map((row) => `
+                  <tr>
+                    <td>${esc(row.po ? row.po.vendorId || '—' : '—')}</td>
+                    <td>${row.po ? `<a href="#orders" data-action="openpo:${attr(row.po.po)}"><b>${esc(row.po.po)}</b></a>` : '—'}</td>
+                    <td><span class="mono">${esc(row.line.itemId || '—')}</span><div class="sub">${esc(row.line.description || '—')}</div></td>
+                    <td class="n">${formatNumber(row.line.ordered)}</td>
+                    <td class="n">
+                      <b>${formatNumber(row.units)}</b>
+                      ${row.plannedUnits !== row.units ? `<div class="sub">of ${formatNumber(row.plannedUnits)} planned</div>` : ''}
+                      ${canEditShipped ? `<button class="link-btn" data-action="edit-shipped-line:${attr(container.id)}:${row.line.id}">Shipped differently</button>` : ''}
+                      ${renderShippedLineEditor(container, row)}
+                    </td>
+                    <td class="n">${formatNumber(row.balanceAfter)}</td>
+                    <td>${renderTag(row.resultVariant, row.resultLabel)}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>` : '<div class="sub">No blocks assigned to this container.</div>'}
+        ${statusKey === 'booked' ? `
+          <div class="card note container-confirm-note">
+            <b>Shipped as planned</b> is the default: confirming does not change quantities. Use “Shipped differently” on a line only if the vendor shipped less.
+          </div>` : statusKey === 'shipped' ? `
+          <div class="sub">Shipped containers are locked except for “Shipped differently” until this container is marked arrived.</div>` : ''}
+      </section>`;
+  }
+
+  function renderRealContainerContents(group) {
+    const pos = realGroupPos(group);
+    const unmatched = group.receipts.filter((receipt) => !receipt.matchPo);
+
+    return `
+      <section class="container-detail-section">
+        <div class="row">
+          <div>
+            <h3>Contents</h3>
+            <div class="sub">${formatNumber(pos.length)} matched POs, ${formatNumber(group.receipts.length)} vendor shipments. Real shipment contents are not in the export.</div>
+          </div>
+          ${renderTag('wn', 'Contents are not in the export')}
+        </div>
+
+        ${pos.length ? `
+          <div class="sc">
+            <table class="compact-table">
+              <thead>
+                <tr>
+                  <th>VENDOR</th>
+                  <th>PO</th>
+                  <th>ITEM</th>
+                  <th class="n">ORDERED</th>
+                  <th class="n">IN THIS CONTAINER</th>
+                  <th class="n">BALANCE AFTER</th>
+                  <th>RESULT</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${pos.map((po) => {
+                  const summary = getPoSummary(po);
+                  let label = 'Not planned';
+                  let variant = 'wn';
+                  if (summary.balance <= 0) {
+                    label = 'Done';
+                    variant = 'ok';
+                  } else if (plannedUnitsForPo(po) > 0 || shippedUnitsForPo(po) > 0) {
+                    label = 'Balance planned elsewhere';
+                    variant = 'info';
+                  }
+                  return `
+                    <tr>
+                      <td>${esc(po.vendorId || '—')}</td>
+                      <td><a href="#orders" data-action="openpo:${attr(po.po)}"><b>${esc(po.po)}</b></a></td>
+                      <td><span class="sub">Contents are not in the export</span></td>
+                      <td class="n">${formatNumber(summary.ordered)}</td>
+                      <td class="n"><span class="sub">—</span></td>
+                      <td class="n">${formatNumber(summary.balance)}</td>
+                      <td>${renderTag(variant, label)}</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>` : '<div class="sub">No receipt in this container matches a PO.</div>'}
+
+        ${unmatched.length ? `
+          <div class="unmatched-container-block">
+            <h3>No matching PO</h3>
+            ${unmatched.map((receipt) => `
+              <div class="row">
+                <span class="mono">${esc(receipt.invoiceNo || 'Receipt')}</span>
+                <span class="sub">${esc(receipt.vendorId || '—')} · ${esc(receipt.type || '—')}</span>
+                ${renderReceiptStatusTag(receipt)}
+              </div>`).join('')}
+          </div>` : ''}
+
+        <div class="sc container-receipts-scroll">
+          <table class="compact-table">
+            <thead>
+              <tr>
+                <th>INVOICE</th>
+                <th>PO</th>
+                <th>VENDOR</th>
+                <th>ETA</th>
+                <th>RECEIVED</th>
+                <th>STATUS</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${group.receipts.map((receipt) => `
+                <tr>
+                  <td class="mono">${esc(receipt.invoiceNo)}</td>
+                  <td>${receipt.matchPo ? `<a href="#orders" data-action="openpo:${attr(receipt.matchPo)}"><b>${esc(receipt.matchPo)}</b></a>` : '<span class="sub">No matching PO</span>'}</td>
+                  <td>${esc(receipt.vendorId || '—')}</td>
+                  <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<div class="sub">${esc(relativeEta(receipt.etaDate))}</div>` : '—'}</td>
+                  <td>${renderReceiptReceivedDate(receipt, 'Not yet')}</td>
+                  <td>${renderReceiptStatusTag(receipt)}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+  }
+
+  function containerRecordMatchesLegacyUpdate(record, update) {
+    const tracking = normalizeTracking(update.tracking);
+    if (record.kind === 'planner') {
+      if (tracking && (tracking === normalizeTracking(record.container.name) || tracking === normalizeTracking(record.container.id))) {
+        return true;
+      }
+      return Boolean(update.po && plannerContainerPos(record.container).some((po) => po.po === update.po));
+    }
+    if (tracking && tracking === record.group.tracking) return true;
+    return Boolean(update.po && record.group.receipts.some((receipt) => receipt.matchPo === update.po));
+  }
+
+  function legacyUpdatesForRecord(record) {
+    return state.vendorUpdates.filter((update) => containerRecordMatchesLegacyUpdate(record, update));
+  }
+
+  function migrateLegacyVendorUpdates() {
+    const records = [
+      ...state.plannerContainers.map((container) => ({ kind: 'planner', key: container.id, container })),
+      ...realContainerGroups().filter((group) => !group.isBlank).map((group) => ({ kind: 'real', key: group.key, group })),
+    ];
+
+    state.vendorUpdates.forEach((update) => {
+      const record = records.find((row) => containerRecordMatchesLegacyUpdate(row, update));
+      if (!record || state.vendorDetails[record.key]) return;
+      state.vendorDetails[record.key] = {
+        tracking: update.tracking || '',
+        invoice: update.invoice || '',
+        vessel: update.vessel || '',
+        etd: update.etd || '',
+        eta: update.eta || '',
+        port: update.port || '',
+        warehouse: update.warehouse || '',
+        cartons: update.cartons == null ? null : update.cartons,
+        grossWeight: update.grossWeight == null ? null : update.grossWeight,
+        cbm: update.cbm == null ? null : update.cbm,
+        status: update.status || '',
+        source: update.source || '',
+        contact: update.contact || '',
+        notes: update.notes || '',
+      };
+    });
+  }
+
+  function updateFromVendorDetailsForm(form) {
+    const key = form.dataset.containerKey;
+    const record = findContainerRecord(key);
+    if (!record) return;
+
+    const value = (field) => {
+      const input = form.querySelector(`[data-vd="${field}"]`);
+      return input ? String(input.value || '').trim() : '';
+    };
+    const number = (field) => {
+      const raw = value(field);
+      if (!raw) return null;
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const details = {
+      tracking: value('tracking'),
+      invoice: value('invoice'),
+      vessel: value('vessel'),
+      etd: value('etd'),
+      eta: value('eta'),
+      port: value('port'),
+      warehouse: value('warehouse'),
+      cartons: number('cartons'),
+      grossWeight: number('grossWeight'),
+      cbm: number('cbm'),
+      status: value('status'),
+      source: value('source'),
+      contact: value('contact'),
+      notes: value('notes'),
+      updatedAt: todayIso(),
+    };
+
+    state.vendorDetails[key] = details;
+
+    if (record.kind === 'planner') {
+      record.container.etaDate = details.eta || record.container.etaDate || '';
+      record.container.port = details.port || record.container.port || '';
+      if (details.etd) record.container.sailingDate = details.etd;
+    }
+
+    persistDemoState();
+    render();
+    showToast(`Vendor details saved for ${containerRecordLabel(record)}.`);
+  }
+
+  function renderContainerVendorDetails(record) {
+    const details = vendorDetailsFor(record);
+    const portOptions = Array.from(new Set([details.port, ...(DATA.ports || [])].filter(Boolean)))
+      .map((port) => `<option value="${attr(port)}"${details.port === port ? ' selected' : ''}>${esc(port)}</option>`)
       .join('');
+    const statusOptions = VENDOR_UPDATE_STATUSES
+      .map((status) => `<option value="${attr(status)}"${details.status === status ? ' selected' : ''}>${esc(status)}</option>`)
+      .join('');
+    const sourceOptions = VENDOR_UPDATE_SOURCES
+      .map((source) => `<option value="${attr(source)}"${details.source === source ? ' selected' : ''}>${esc(source)}</option>`)
+      .join('');
+    const legacy = legacyUpdatesForRecord(record);
 
+    return `
+      <section class="container-detail-section">
+        <div class="row">
+          <div>
+            <h3>Vendor details</h3>
+            <div class="sub">Moved from Vendor updates. Saved in this browser for this container.</div>
+          </div>
+          <span class="tag">${formatNumber(legacy.length)} old update${legacy.length === 1 ? '' : 's'}</span>
+        </div>
+
+        <form id="container-vendor-form" class="container-form" data-container-key="${attr(record.key)}">
+          <div class="container-form-grid">
+            <label class="cf"><span>Tracking / container</span><input data-vd="tracking" type="text" value="${attr(details.tracking || '')}" placeholder="Container or booking ref"></label>
+            <label class="cf"><span>Invoice / booking no.</span><input data-vd="invoice" type="text" value="${attr(details.invoice || '')}" placeholder="Vendor invoice or booking no."></label>
+            <label class="cf"><span>Vessel / carrier</span><input data-vd="vessel" type="text" value="${attr(details.vessel || '')}" placeholder="Vessel or carrier"></label>
+            <label class="cf"><span>Port</span><select data-vd="port"><option value="">Select port…</option>${portOptions}</select></label>
+            <label class="cf"><span>ETD</span><input data-vd="etd" type="date" value="${attr(details.etd || '')}"></label>
+            <label class="cf"><span>ETA</span><input data-vd="eta" type="date" value="${attr(details.eta || '')}"></label>
+            <label class="cf"><span>Warehouse</span><input data-vd="warehouse" type="text" value="${attr(details.warehouse || '')}" placeholder="Destination warehouse"></label>
+            <label class="cf"><span>Cartons</span><input data-vd="cartons" type="number" min="0" step="1" value="${details.cartons == null ? '' : attr(details.cartons)}" placeholder="0"></label>
+            <label class="cf"><span>Gross weight (kg)</span><input data-vd="grossWeight" type="number" min="0" step="0.01" value="${details.grossWeight == null ? '' : attr(details.grossWeight)}" placeholder="0"></label>
+            <label class="cf"><span>CBM</span><input data-vd="cbm" type="number" min="0" step="0.01" value="${details.cbm == null ? '' : attr(details.cbm)}" placeholder="0"></label>
+            <label class="cf"><span>Status</span><select data-vd="status"><option value="">Select status…</option>${statusOptions}</select></label>
+            <label class="cf"><span>Source</span><select data-vd="source"><option value="">Select source…</option>${sourceOptions}</select></label>
+            <label class="cf"><span>Received from</span><input data-vd="contact" type="text" value="${attr(details.contact || '')}" placeholder="Vendor contact name"></label>
+          </div>
+          <label class="cf"><span>Other details / notes</span><textarea data-vd="notes" rows="3" placeholder="Packaging, documents, delays, partial shipment, other POs in the same container…">${esc(details.notes || '')}</textarea></label>
+          <div class="row">
+            <span class="sub">Browser-local · ${details.updatedAt ? `saved ${formatDate(details.updatedAt)}` : 'not edited yet'}</span>
+            <button class="p" type="submit">Save vendor details</button>
+          </div>
+        </form>
+
+        ${legacy.length ? `
+          <div class="legacy-updates">
+            <div class="sub">Carried over from the old Vendor updates store</div>
+            ${legacy.map((update) => `
+              <div class="legacy-update-row">
+                <b>${esc(update.status || 'Update')}</b>
+                <span class="sub">${esc(update.tracking || update.po || '—')} · ${esc(update.loggedAt ? formatDate(update.loggedAt) : '—')}</span>
+                ${update.notes ? `<div>${esc(update.notes)}</div>` : ''}
+              </div>`).join('')}
+          </div>` : ''}
+      </section>`;
+  }
+
+  function renderContainerDocuments(record) {
+    const documents = state.containerDocuments[record.key] || [];
+    return `
+      <section class="container-detail-section">
+        <div class="row">
+          <div>
+            <h3>Documents</h3>
+            <div class="sub">Packing list, invoice, booking confirmation. File metadata is kept in this browser only; nothing is uploaded or parsed.</div>
+          </div>
+        </div>
+        <div class="container-doc-input">
+          <label class="field-label" for="container-doc-input">Attach file</label>
+          <input id="container-doc-input" type="file" multiple data-container-document="${attr(record.key)}">
+        </div>
+        ${documents.length ? `
+          <div class="sc">
+            <table class="compact-table container-doc-table">
+              <thead><tr><th>FILE</th><th>TYPE</th><th>DATE</th><th></th></tr></thead>
+              <tbody>
+                ${documents.map((document, index) => `
+                  <tr>
+                    <td>${esc(document.name)}</td>
+                    <td>${esc(document.type || '—')}</td>
+                    <td>${formatDate(document.date)}</td>
+                    <td class="n"><button class="s" data-action="remove-container-document:${attr(record.key)}:${index}">Remove</button></td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>` : '<div class="sub">No documents attached.</div>'}
+      </section>`;
+  }
+
+  function renderContainerDetail(record) {
+    return `
+      <button class="container-detail-backdrop" data-action="close-container" aria-label="Close container detail"></button>
+      <section class="container-detail" role="dialog" aria-modal="true" aria-labelledby="container-detail-title">
+        <div class="container-detail-mobile-bar">
+          <button class="s" data-action="close-container">← Back to containers</button>
+        </div>
+        <div id="container-detail-title">${renderContainerDetailHeader(record)}</div>
+        ${record.kind === 'planner'
+          ? renderPlannerContainerContents(record.container)
+          : renderRealContainerContents(record.group)}
+        ${renderContainerVendorDetails(record)}
+        ${renderContainerDocuments(record)}
+      </section>`;
+  }
+
+  function renderContainerSegmentedControl() {
+    const counts = containerViewCounts();
+    const views = [
+      ['plan', 'Plan'],
+      ['water', 'On the water'],
+      ['arrived', 'Arrived'],
+    ];
+    return `
+      <div class="segmented-control" role="tablist" aria-label="Container views">
+        ${views.map(([key, label]) => `
+          <button class="${state.containersView === key ? 'on' : ''}" data-action="container-view:${key}" role="tab" aria-selected="${state.containersView === key}">
+            ${esc(label)} <span class="seg-count">(${formatNumber(counts[key])})</span>
+          </button>`).join('')}
+      </div>`;
+  }
+
+  function renderPlannerContainerCard(container) {
+    const used = plannerUsedCbm(container);
+    const fill = (used / container.capacity) * 100;
+    const missing = plannerMissingCbm(container);
+    const statusKey = containerStatusKey(container);
+    const status = CONTAINER_STATUSES[statusKey];
+    const editable = containerIsEditable(container);
+    const units = containerUnits(container);
+    const hasBlocks = container.assignments.length > 0;
+    const locked = !editable || fill > 100;
     const blockLabels = new Map();
     const blockCounts = new Map();
-    state.plannerContainers.forEach((container) => {
-      container.assignments.forEach((assignment, index) => {
+    state.plannerContainers.forEach((row) => {
+      row.assignments.forEach((assignment, index) => {
         const number = (blockCounts.get(assignment.lineId) || 0) + 1;
         blockCounts.set(assignment.lineId, number);
-        blockLabels.set(`${container.id}:${index}`, `B${number}`);
+        blockLabels.set(`${row.id}:${index}`, `B${number}`);
       });
     });
 
-    const plannedUnits = state.plannerContainers
-      .filter((container) => containerIsEditable(container))
-      .reduce((sum, container) => sum + containerUnits(container), 0);
-    const shippedUnits = state.plannerContainers
-      .filter((container) => containerStatusKey(container) === 'shipped')
-      .reduce((sum, container) => sum + containerUnits(container), 0);
-    const arrivedUnits = state.plannerContainers
-      .filter((container) => containerStatusKey(container) === 'arrived')
-      .reduce((sum, container) => sum + containerUnits(container), 0);
-    const statusCounts = Object.keys(CONTAINER_STATUSES).reduce((counts, key) => {
-      counts[key] = state.plannerContainers.filter((container) => containerStatusKey(container) === key).length;
-      return counts;
-    }, {});
+    return `
+      <div class="card" data-container-card="${attr(container.id)}">
+        <div class="row">
+          <div>
+            <button class="container-title-btn" data-action="open-container:${attr(container.id)}">
+              <b>${esc(container.name)}</b> · ${esc(container.type)}
+            </button>
+            ${renderTag(status.variant, status.label)}
+            ${container.name !== container.id ? `<div class="sub mono">${esc(container.id)}</div>` : ''}
+          </div>
+          <div class="container-actions">
+            <button class="s" data-action="open-container:${attr(container.id)}">Open</button>
+            ${statusKey === 'draft' ? `<button class="s" data-action="book-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Mark this container as booked. Units stay planned.">Mark booked</button>` : ''}
+            ${statusKey === 'draft' || statusKey === 'booked' ? `<button class="p" data-action="ship-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Move this container's planned units into In transit.">Mark as shipped</button>` : ''}
+            ${statusKey === 'shipped' ? `<button class="p" data-action="arrive-container:${attr(container.id)}" title="Add this container's units to received balances in this session.">Mark arrived</button>` : ''}
+            ${editable ? `<button class="s" data-action="remove-container:${attr(container.id)}" title="Remove this draft or booked container.">Remove</button>` : ''}
+          </div>
+        </div>
+        <div class="container-summary">
+          <span class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</span>
+          <div class="container-meta">
+            <label>
+              <span class="field-label">Sailing</span>
+              <input type="date" data-container-sailing="${attr(container.id)}" value="${attr(container.sailingDate || '')}">
+            </label>
+            <label>
+              <span class="field-label">Port</span>
+              <input type="text" data-container-port="${attr(container.id)}" value="${attr(container.port || '')}" placeholder="Port">
+            </label>
+          </div>
+        </div>
+        <div class="bar">
+          <i class="${fill > 100 ? 'r' : ''}" style="width:${Math.min(100, fill)}%"></i>
+        </div>
+        <div class="sub">
+          ${fill.toFixed(1)}% full${fill > 100 ? ' · OVER CAPACITY' : ''}
+          ${missing ? ` · ${missing} CBM-missing assignment${missing === 1 ? '' : 's'}` : ''}
+        </div>
+        <div class="zone container-drop${locked ? ' lock' : ''}" data-planner-zone="${attr(container.id)}">
+          ${container.assignments.map((assignment, index) => {
+            const line = lineById.get(assignment.lineId);
+            const block = blockLabels.get(`${container.id}:${index}`) || assignment.block || 'B1';
+            return `
+              <div class="blk l2">
+                ${renderTag('', block)} <b class="mono">${esc(line ? line.itemId : '—')}</b>
+                ${line && line.poRef ? `<span class="sub">· ${esc(line.poRef.po)}</span>` : ''}
+                · ${formatNumber(assignment.units)} u
+                · ${assignment.cbm == null ? 'CBM missing' : formatCbm(assignment.cbm)}
+                ${editable ? `<button class="s" data-action="unassign:${attr(container.id)}:${assignment.lineId}:${index}">Remove</button>` : ''}
+              </div>`;
+          }).join('') || `<div class="sub">${editable ? 'Drop lines here.' : 'No blocks.'}</div>`}
+        </div>
+      </div>`;
+  }
+
+  function renderContainersPlan() {
+    const allItems = plannerItems();
+    const items = filterPlannerItems(allItems);
+    const containers = state.plannerContainers.filter((container) => containerIsEditable(container));
+    const missingCbmAssignments = containers.reduce((sum, container) => sum + plannerMissingCbm(container), 0);
+    const typeOptions = Object.entries(CONTAINER_TYPES)
+      .map(([key, value]) => `<option value="${key}">${value.label} · ${value.capacity} CBM</option>`)
+      .join('');
+    const plannedUnits = containers.reduce((sum, container) => sum + containerUnits(container), 0);
     const remainingUnits = allItems.reduce((sum, item) => sum + item.remaining, 0);
 
     return `
-      ${renderHeader('Planner')}
-
       <div class="card row" style="justify-content:flex-start">
         <input
           id="planner-container-type"
           class="planner-container-input"
           type="text"
           list="planner-container-types"
-          placeholder="Type container (e.g. 40HC)"
+          placeholder="Container name or type (e.g. 40HC)"
           autocomplete="off"
         >
         <datalist id="planner-container-types">${typeOptions}</datalist>
         <button class="p" data-action="add-container">Add container</button>
-        ${statusCounts.draft + statusCounts.booked ? `<button class="s" data-action="clear-plan" title="Removes draft and booked containers only. Shipped and arrived containers stay.">Clear draft/booked</button>` : ''}
+        ${containers.length ? `<button class="s" data-action="clear-plan" title="Removes draft and booked containers only. Shipped and arrived containers stay.">Clear draft/booked</button>` : ''}
         <span class="sub">${formatNumber(allItems.length)} open line${allItems.length === 1 ? '' : 's'}</span>
-        <span class="sub">${formatNumber(plannedUnits)} units planned · ${formatNumber(shippedUnits)} shipped · ${formatNumber(arrivedUnits)} arrived · ${formatNumber(remainingUnits)} unplanned</span>
-        <span class="sub">Containers: ${formatNumber(statusCounts.draft)} draft · ${formatNumber(statusCounts.booked)} booked · ${formatNumber(statusCounts.shipped)} shipped · ${formatNumber(statusCounts.arrived)} arrived</span>
+        <span class="sub">${formatNumber(plannedUnits)} units planned · ${formatNumber(remainingUnits)} unplanned</span>
         ${missingCbmAssignments ? renderTag('bad', `${missingCbmAssignments} assigned line${missingCbmAssignments === 1 ? '' : 's'} with CBM missing`, 'The fill bar excludes CBM-missing assignments.') : ''}
       </div>
 
@@ -2851,67 +2790,570 @@
         </div>
 
         <div class="ctns">
-          ${state.plannerContainers.map((container) => {
-            const used = plannerUsedCbm(container);
-            const fill = (used / container.capacity) * 100;
-            const missing = plannerMissingCbm(container);
-            const statusKey = containerStatusKey(container);
-            const status = CONTAINER_STATUSES[statusKey];
-            const editable = containerIsEditable(container);
-            const units = containerUnits(container);
-            const hasBlocks = container.assignments.length > 0;
-            const locked = !editable || fill > 100;
-            return `
-              <div class="card">
-                <div class="row">
-                  <div><b>${esc(container.id)} · ${esc(container.type)}</b> ${renderTag(status.variant, status.label)}</div>
-                  <div class="container-actions">
-                    ${statusKey === 'draft' ? `<button class="s" data-action="book-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Mark this container as booked. Units stay planned.">Mark booked</button>` : ''}
-                    ${statusKey === 'draft' || statusKey === 'booked' ? `<button class="p" data-action="ship-container:${attr(container.id)}"${hasBlocks ? '' : ' disabled'} title="Move this container's planned units into In transit.">Mark as shipped</button>` : ''}
-                    ${statusKey === 'shipped' ? `<button class="p" data-action="arrive-container:${attr(container.id)}" title="Add this container's units to received balances in this session.">Mark arrived</button>` : ''}
-                    ${editable ? `<button class="s" data-action="remove-container:${attr(container.id)}" title="Remove this draft or booked container.">Remove</button>` : ''}
-                  </div>
-                </div>
-                <div class="container-summary">
-                  <span class="sub">${formatCbm(used)} of ${container.capacity} CBM · ${formatNumber(units)} units</span>
-                  <div class="container-meta">
-                    <label>
-                      <span class="field-label">Sailing</span>
-                      <input type="date" data-container-sailing="${attr(container.id)}" value="${attr(container.sailingDate || '')}">
-                    </label>
-                    <label>
-                      <span class="field-label">Port</span>
-                      <input type="text" data-container-port="${attr(container.id)}" value="${attr(container.port || '')}" placeholder="Port">
-                    </label>
-                  </div>
-                </div>
-                <div class="bar">
-                  <i class="${fill > 100 ? 'r' : ''}" style="width:${Math.min(100, fill)}%"></i>
-                </div>
-                <div class="sub">
-                  ${fill.toFixed(1)}% full${fill > 100 ? ' · OVER CAPACITY' : ''}
-                  ${missing ? ` · ${missing} CBM-missing assignment${missing === 1 ? '' : 's'}` : ''}
-                </div>
-                <div class="zone container-drop${locked ? ' lock' : ''}" data-planner-zone="${attr(container.id)}">
-                  ${container.assignments.map((assignment, index) => {
-                    const line = lineById.get(assignment.lineId);
-                    const block = blockLabels.get(`${container.id}:${index}`) || 'B1';
-                    return `
-                      <div class="blk l2">
-                        ${renderTag('', block)} <b class="mono">${esc(line ? line.itemId : '—')}</b>
-                        ${line && line.poRef ? `<span class="sub">· ${esc(line.poRef.po)}</span>` : ''}
-                        · ${formatNumber(assignment.units)} u
-                        · ${assignment.cbm == null ? 'CBM missing' : formatCbm(assignment.cbm)}
-                        ${editable ? `<button class="s" data-action="unassign:${attr(container.id)}:${assignment.lineId}:${index}">Remove</button>` : ''}
-                      </div>`;
-                  }).join('') || `<div class="sub">${editable ? 'Drop lines here.' : 'No blocks.'}</div>`}
-                </div>
-              </div>`;
-          }).join('') || '<div class="card sub">No containers yet. Add one to start planning.</div>'}
+          ${containers.map(renderPlannerContainerCard).join('') || '<div class="card sub">No draft or booked containers. Add one to start planning.</div>'}
         </div>
+      </div>`;
+  }
+
+  function realGroupMatchesStatus(group, status) {
+    if (!status) return true;
+    return group.receipts.some((receipt) => getReceiptStatus(receipt) === status);
+  }
+
+  function filteredContainerRows(view) {
+    const query = String(state.containersQuery || '').trim().toLowerCase();
+    const type = state.containersType;
+    const status = state.containersStatus;
+
+    return containerRecordsForView(view).filter((record) => {
+      if (record.kind === 'planner') {
+        const container = record.container;
+        if (type) return false;
+        if (status && !(view === 'water' && status === 'In transit') && !(view === 'arrived' && status === 'Received')) return false;
+        if (state.vendorFilter && !plannerContainerVendors(container).includes(state.vendorFilter)) return false;
+        if (state.buyerFilter && !plannerContainerPos(container).some((po) => po.buyer === state.buyerFilter)) return false;
+        return !query || plannerContainerSearchText(container).includes(query);
+      }
+
+      const group = record.group;
+      if (type && !group.receipts.some((receipt) => receipt.type === type)) return false;
+      if (!realGroupMatchesStatus(group, status)) return false;
+      if (state.vendorFilter && !group.receipts.some((receipt) => receipt.vendorId === state.vendorFilter)) return false;
+      if (state.buyerFilter && !group.receipts.some((receipt) => receipt.poRef && receipt.poRef.buyer === state.buyerFilter)) return false;
+      return !query || realGroupSearchText(group).includes(query);
+    });
+  }
+
+  function renderRealContainerRow(group) {
+    const expanded = state.expandedContainerGroups.has(group.key);
+    const vendors = realGroupVendors(group);
+    const pos = realGroupPos(group);
+    const eta = realGroupEta(group);
+    const status = realGroupStatus(group);
+    const trackingTag = group.isContainer
+      ? ''
+      : renderTag('wn', 'LCL / carrier reference', 'This receipt export value is not a standard container number.');
+    const shared = group.receipts.length > 1;
+
+    return `
+      <div class="ship-group">
+        <div class="ship-group-head">
+          <button class="ship-group-open" data-action="open-container:${attr(group.key)}">
+            <span class="ship-group-name">
+              <b>${esc(group.isContainer ? `Container ${group.label}` : `Tracking no. ${group.label}`)}</b>
+              ${trackingTag}
+              <span class="sub">${formatNumber(group.receipts.length)} vendor shipment${group.receipts.length === 1 ? '' : 's'} · ${formatNumber(pos.length)} PO${pos.length === 1 ? '' : 's'}${vendors.length ? ` · ${esc(vendors.slice(0, 2).join(', '))}${vendors.length > 2 ? ` +${vendors.length - 2}` : ''}` : ''}</span>
+            </span>
+            <span class="ship-group-eta">${eta ? formatDate(eta) : 'No ETA'}</span>
+            ${shared ? renderTag('info', `Shared · ${formatNumber(group.receipts.length)}`) : ''}
+            ${renderTag(tagVariantForStatus(status), receiptStatusLabel(status))}
+          </button>
+          <button class="s ship-expand-btn" data-action="toggle-container-group:${attr(group.key)}" aria-expanded="${expanded}">
+            ${expanded ? '▾ Hide shipments' : '▸ Show shipments'}
+          </button>
+        </div>
+        ${expanded ? `
+          <div class="sc">
+            <table class="compact-table">
+              <thead>
+                <tr>
+                  <th>INVOICE</th>
+                  <th>PO</th>
+                  <th>VENDOR</th>
+                  <th>ETA</th>
+                  <th>RECEIVED</th>
+                  <th>STATUS</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${group.receipts.map((receipt) => `
+                  <tr>
+                    <td class="mono">${esc(receipt.invoiceNo)}<div class="sub">${esc(receipt.type || '—')}</div></td>
+                    <td>${receipt.matchPo ? `<a href="#orders" data-action="openpo:${attr(receipt.matchPo)}"><b>${esc(receipt.matchPo)}</b></a>` : '<span class="sub">No matching PO</span>'}</td>
+                    <td>${esc(receipt.vendorId || '—')}</td>
+                    <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<div class="sub">${esc(relativeEta(receipt.etaDate))}</div>` : '—'}</td>
+                    <td>${renderReceiptReceivedDate(receipt, 'Not yet')}</td>
+                    <td>${renderReceiptStatusTag(receipt)}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>` : ''}
+      </div>`;
+  }
+
+  function renderPlannerContainerRow(container) {
+    const statusKey = containerStatusKey(container);
+    const status = CONTAINER_STATUSES[statusKey];
+    const vendors = plannerContainerVendors(container);
+    const pos = plannerContainerPos(container);
+    const eta = vendorDetailsFor({ kind: 'planner', key: container.id, container }).eta;
+    return `
+      <div class="ship-group">
+        <div class="ship-group-head">
+          <button class="ship-group-open" data-action="open-container:${attr(container.id)}">
+            <span class="ship-group-name">
+              <b>${esc(container.name)}</b>
+              <span class="sub">${esc(container.type)} · ${formatNumber(vendors.length)} vendor${vendors.length === 1 ? '' : 's'} · ${formatNumber(pos.length)} PO${pos.length === 1 ? '' : 's'} · ${formatNumber(containerUnits(container))} units</span>
+            </span>
+            <span class="ship-group-eta">${eta ? formatDate(eta) : 'No ETA'}</span>
+            ${renderTag(status.variant, status.label)}
+          </button>
+        </div>
+      </div>`;
+  }
+
+  function renderUntrackedReceipts(view) {
+    const query = String(state.containersQuery || '').trim().toLowerCase();
+    const groups = realContainerGroups().filter((group) => group.isBlank
+      && (view === 'arrived' ? realGroupReceived(group) : !realGroupReceived(group))
+      && (!state.containersType || group.receipts.some((receipt) => receipt.type === state.containersType))
+      && realGroupMatchesStatus(group, state.containersStatus)
+      && (!state.vendorFilter || group.receipts.some((receipt) => receipt.vendorId === state.vendorFilter))
+      && (!state.buyerFilter || group.receipts.some((receipt) => receipt.poRef && receipt.poRef.buyer === state.buyerFilter))
+      && (!query || realGroupSearchText(group).includes(query)));
+    if (!groups.length) return '';
+
+    return `
+      <section class="card untracked-receipts">
+        <div class="row">
+          <div>
+            <h2>Receipts without a tracking number</h2>
+            <div class="sub">Kept from the receipt export. They are receipts, not containers, so they are excluded from the container counts.</div>
+          </div>
+          ${renderTag('wn', `${formatNumber(groups.reduce((sum, group) => sum + group.receipts.length, 0))} receipts`)}
+        </div>
+        <div class="sc">
+          <table class="compact-table">
+            <thead><tr><th>INVOICE</th><th>PO</th><th>VENDOR</th><th>ETA</th><th>RECEIVED</th><th>STATUS</th></tr></thead>
+            <tbody>
+              ${groups.flatMap((group) => group.receipts.map((receipt) => `
+                <tr>
+                  <td class="mono">${esc(receipt.invoiceNo)}<div class="sub">${esc(receipt.type || '—')}</div></td>
+                  <td>${receipt.matchPo ? `<a href="#orders" data-action="openpo:${attr(receipt.matchPo)}"><b>${esc(receipt.matchPo)}</b></a>` : '<span class="sub">No matching PO</span>'}</td>
+                  <td>${esc(receipt.vendorId || '—')}</td>
+                  <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<div class="sub">${esc(relativeEta(receipt.etaDate))}</div>` : '—'}</td>
+                  <td>${renderReceiptReceivedDate(receipt, 'Not yet')}</td>
+                  <td>${renderReceiptStatusTag(receipt)}</td>
+                </tr>`)).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>`;
+  }
+
+  function renderContainersList(view) {
+    const allRows = filteredContainerRows(view);
+    const pageSize = state.containersPageSize;
+    const pages = Math.max(1, Math.ceil(allRows.length / pageSize));
+    state.containersPage = Math.min(Math.max(1, state.containersPage), pages);
+    const start = (state.containersPage - 1) * pageSize;
+    const pageRows = allRows.slice(start, start + pageSize);
+    const realOnPage = pageRows.filter((row) => row.kind === 'real');
+    const receiptsOnPage = realOnPage.reduce((sum, row) => sum + row.group.receipts.length, 0);
+    const shared = allRows.filter((row) => row.kind === 'real' && row.group.receipts.length > 1).length;
+
+    return `
+      <div class="row" style="margin-bottom:8px">
+        <span class="sub">${formatNumber(allRows.length)} container/tracking row${allRows.length === 1 ? '' : 's'} · ${formatNumber(shared)} shared · ${formatNumber(receiptsOnPage)} vendor shipment${receiptsOnPage === 1 ? '' : 's'} on this page</span>
+        <span class="row" style="gap:6px">
+          <button class="s" data-action="containers-expand-all"${pageRows.some((row) => row.kind === 'real') ? '' : ' disabled'}>Expand all</button>
+          <button class="s" data-action="containers-collapse-all"${state.expandedContainerGroups.size ? '' : ' disabled'}>Collapse all</button>
+        </span>
       </div>
 
-      ${renderPlannerAssignmentDialog()}`;
+      ${pageRows.length ? `
+        <div class="ship-groups">
+          ${pageRows.map((row) => row.kind === 'planner' ? renderPlannerContainerRow(row.container) : renderRealContainerRow(row.group)).join('')}
+        </div>
+        <div class="row" style="margin-top:10px">
+          <span class="sub">Showing ${formatNumber(start + 1)}–${formatNumber(Math.min(allRows.length, start + pageSize))} of ${formatNumber(allRows.length)} rows</span>
+          <span class="row" style="gap:6px">
+            <button class="s" data-action="containers-page:1"${state.containersPage <= 1 ? ' disabled' : ''}>« First</button>
+            <button class="s" data-action="containers-page:${state.containersPage - 1}"${state.containersPage <= 1 ? ' disabled' : ''}>‹ Prev</button>
+            ${paginationButtons(pages, state.containersPage, 'containers-page')}
+            <button class="s" data-action="containers-page:${state.containersPage + 1}"${state.containersPage >= pages ? ' disabled' : ''}>Next ›</button>
+            <button class="s" data-action="containers-page:${pages}"${state.containersPage >= pages ? ' disabled' : ''}>Last »</button>
+          </span>
+        </div>` : '<div class="card sub">No containers match the current filters.</div>'}
+      ${renderUntrackedReceipts(view)}
+    `;
+  }
+
+  function renderContainersShipments(view) {
+    const statusOptions = view === 'arrived'
+      ? [['Received', 'Received']]
+      : [
+        ['In transit', 'On the way'],
+        ['Overdue', 'Past ETA'],
+        ['No ETA', 'No ETA'],
+        ['Unmatched', 'No matching PO'],
+        ['Invalid data', 'Invalid data'],
+      ];
+    const typeOptions = ['ContRec', 'LCL', 'CustCon', 'Internal'];
+
+    return `
+      <div class="card row" style="justify-content:flex-start">
+        <input type="search" id="containers-search" placeholder="Container, invoice, PO or vendor" value="${attr(state.containersQuery)}" style="min-width:280px">
+        <select id="containers-type">
+          <option value="">All receipt types</option>
+          ${typeOptions.map((type) => `<option value="${attr(type)}"${state.containersType === type ? ' selected' : ''}>${esc(type)}</option>`).join('')}
+        </select>
+        <select id="containers-status">
+          <option value="">All statuses</option>
+          ${statusOptions.map(([value, label]) => `<option value="${attr(value)}"${state.containersStatus === value ? ' selected' : ''}>${esc(label)}</option>`).join('')}
+        </select>
+      </div>
+      <div id="containers-list-host">${renderContainersList(view)}</div>`;
+  }
+
+  function updateContainersList() {
+    const host = document.getElementById('containers-list-host');
+    if (!host) return;
+    host.innerHTML = renderContainersList(state.containersView);
+  }
+
+  function unmatchedLegacyVendorUpdates() {
+    const records = [
+      ...state.plannerContainers.map((container) => ({ kind: 'planner', key: container.id, container })),
+      ...realContainerGroups().filter((group) => !group.isBlank).map((group) => ({ kind: 'real', key: group.key, group })),
+    ];
+    return state.vendorUpdates.filter((update) =>
+      !records.some((record) => containerRecordMatchesLegacyUpdate(record, update)));
+  }
+
+  function renderLegacyVendorUpdates() {
+    const updates = unmatchedLegacyVendorUpdates();
+    if (!updates.length) return '';
+    return `
+      <details class="card">
+        <summary><b>Vendor updates not yet attached to a container</b> <span class="sub">${formatNumber(updates.length)} kept from the old page</span></summary>
+        <div class="sc" style="margin-top:10px">
+          <table class="compact-table">
+            <thead><tr><th>PO</th><th>TRACKING</th><th>STATUS</th><th>NOTES</th><th>LOGGED</th></tr></thead>
+            <tbody>
+              ${updates.map((update) => `
+                <tr>
+                  <td>${esc(update.po || '—')}</td>
+                  <td class="mono">${esc(update.tracking || '—')}</td>
+                  <td>${esc(update.status || '—')}</td>
+                  <td>${esc(update.notes || '—')}</td>
+                  <td>${update.loggedAt ? formatDate(update.loggedAt) : '—'}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </details>`;
+  }
+
+  function renderContainers() {
+    const detailId = currentContainerDetailId();
+    const record = detailId ? findContainerRecord(detailId) : null;
+    if (detailId && record) {
+      state.containersView = record.kind === 'real'
+        ? (realGroupReceived(record.group) ? 'arrived' : 'water')
+        : (containerStatusKey(record.container) === 'arrived'
+          ? 'arrived'
+          : containerStatusKey(record.container) === 'shipped' ? 'water' : 'plan');
+    }
+    const detailMarkup = detailId
+      ? (record
+        ? renderContainerDetail(record)
+        : `<section class="container-detail"><div class="container-detail-mobile-bar"><button class="s" data-action="close-container">← Back to containers</button></div><div class="card">Container “${esc(detailId)}” was not found. <button class="s" data-action="close-container">Back to containers</button></div></section>`)
+      : '';
+
+    let body;
+    if (state.containersView === 'plan') body = renderContainersPlan();
+    else body = renderContainersShipments(state.containersView);
+
+    return `
+      ${renderHeader(
+        'Containers',
+        `The container is the source of truth: contents come from planning, and real shipment balances come from the PO export. Data as of ${AS_OF_LABEL}.`,
+        `<div class="row"><span class="sub">Browser-local demo data</span><button class="s" data-action="reset-demo">Reset demo data</button></div>`
+      )}
+      ${renderContainerSegmentedControl()}
+      <div class="containers-page${detailId ? ' has-detail' : ''}">
+        ${body}
+        ${renderLegacyVendorUpdates()}
+      </div>
+      ${detailMarkup}
+      ${state.containersView === 'plan' ? renderPlannerAssignmentDialog() : ''}`;
+  }
+
+  function confirmContainerShipping(containerId) {
+    const container = syncContainerFieldsFromDom(containerId);
+    if (!container) return;
+    if (containerStatusKey(container) !== 'booked') {
+      showToast('Confirm shipment is available on booked containers.');
+      return;
+    }
+    if (!container.assignments.length) {
+      showToast('Add at least one block before confirming this shipment.');
+      return;
+    }
+    if (!container.sailingDate) container.sailingDate = AS_OF;
+    container.status = 'shipped';
+    state.shippingLineEdit = '';
+    syncPlannerAssigned();
+    clearSummaryCache();
+    persistDemoState();
+    render();
+    showToast(`${container.name} shipped as planned — no quantities changed.`);
+  }
+
+  function editShippedLine(containerId, lineId) {
+    const container = state.plannerContainers.find((row) => row.id === containerId);
+    if (!container) return;
+    const status = containerStatusKey(container);
+    if (status !== 'booked' && status !== 'shipped') {
+      showToast('Shipped differently is only available before arrival.');
+      return;
+    }
+    state.shippingLineEdit = `${containerId}:${Number(lineId)}`;
+    const scrollY = window.scrollY;
+    render();
+    window.scrollTo({ top: scrollY });
+    setTimeout(() => {
+      const input = document.querySelector('[data-shipped-line-input]');
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    }, 0);
+  }
+
+  function saveShippedLine(containerId, lineId) {
+    const container = state.plannerContainers.find((row) => row.id === containerId);
+    const lineNumber = Number(lineId);
+    if (!container) return;
+    const status = containerStatusKey(container);
+    if (status !== 'booked' && status !== 'shipped') {
+      showToast('Shipped differently is only available before arrival.');
+      return;
+    }
+    const assignmentRows = container.assignments.filter((assignment) => assignment.lineId === lineNumber);
+    if (!assignmentRows.length) return;
+    const input = document.querySelector('[data-shipped-line-input]');
+    const requested = Number(input ? input.value : '');
+    if (!Number.isFinite(requested) || requested < 0) {
+      showToast('Enter a shipped quantity of 0 or more.');
+      if (input) input.focus();
+      return;
+    }
+    const planned = assignmentRows.reduce((sum, assignment) => sum + (assignment.plannedUnits == null ? assignment.units : assignment.plannedUnits), 0);
+    const actual = Math.min(planned, Math.floor(requested));
+    let remaining = actual;
+    assignmentRows.forEach((assignment) => {
+      assignment.plannedUnits = assignment.plannedUnits == null ? assignment.units : assignment.plannedUnits;
+      const nextUnits = Math.min(remaining, assignment.plannedUnits);
+      assignment.units = nextUnits;
+      remaining -= nextUnits;
+      if (assignment.cbmPerUnit != null) assignment.cbm = nextUnits * assignment.cbmPerUnit;
+    });
+    state.shippingLineEdit = '';
+    syncPlannerAssigned();
+    clearSummaryCache();
+    persistDemoState();
+    const line = lineById.get(lineNumber);
+    render();
+    showToast(`${line ? line.itemId : 'Line'} updated to ${formatNumber(actual)} shipped${planned > actual ? ` · short by ${formatNumber(planned - actual)}` : ''}.`);
+  }
+
+  function markRealContainerArrived(groupKey) {
+    const group = realContainerGroups().find((row) => row.key === groupKey);
+    if (!group) return;
+    let marked = 0;
+    group.receipts.forEach((receipt) => {
+      if (isReceiptReceived(receipt)) return;
+      state.simulatedReceipts[receipt.id] = { receivedDate: AS_OF, quantities: {} };
+      marked += 1;
+    });
+    clearSummaryCache();
+    persistDemoState();
+    render();
+    showToast(`${group.label} marked arrived — ${formatNumber(marked)} vendor shipment${marked === 1 ? '' : 's'} updated. Real receipts carry no line quantities.`);
+  }
+
+  function addContainerDocuments(key, files) {
+    const record = findContainerRecord(key);
+    if (!record) return;
+    const existing = state.containerDocuments[key] || [];
+    Array.from(files || []).forEach((file) => {
+      existing.push({
+        name: file.name,
+        type: file.type || (file.name.includes('.') ? file.name.split('.').pop().toUpperCase() : 'File'),
+        date: todayIso(),
+      });
+    });
+    state.containerDocuments[key] = existing;
+    persistDemoState();
+    render();
+    showToast(`${formatNumber(files ? files.length : 0)} document${files && files.length === 1 ? '' : 's'} attached.`);
+  }
+
+  function removeContainerDocument(key, index) {
+    const record = findContainerRecord(key);
+    if (!record) return;
+    const documents = state.containerDocuments[key] || [];
+    documents.splice(Number(index), 1);
+    state.containerDocuments[key] = documents;
+    persistDemoState();
+    render();
+  }
+
+  function resetDemoData() {
+    try {
+      window.localStorage.removeItem(DEMO_STORAGE_KEY);
+    } catch (error) {
+      /* Reset still applies in memory. */
+    }
+    state.plannerContainers = [];
+    state.plannerContainerSequence = 0;
+    state.plannerAssigned = {};
+    state.plannerSelectedLineId = null;
+    state.plannerPendingAssignment = null;
+    state.simulatedReceipts = {};
+    state.simulatedLineQty = {};
+    state.poConfirmations = {};
+    state.vendorDetails = {};
+    state.containerDocuments = {};
+    state.shippingLineEdit = '';
+    state.expandedContainerGroups = new Set();
+    state.containersPage = 1;
+    clearSummaryCache();
+    render();
+    showToast('Demo data reset. The old Vendor updates store was left untouched.');
+  }
+
+  function poConfirmation(poNumber) {
+    if (!state.poConfirmations[poNumber]) {
+      state.poConfirmations[poNumber] = {
+        status: 'Not sent',
+        notes: '',
+        readyDates: {},
+      };
+    }
+    const record = state.poConfirmations[poNumber];
+    if (!record.readyDates || typeof record.readyDates !== 'object') record.readyDates = {};
+    if (!VENDOR_CONFIRMATION_STATUSES.includes(record.status)) record.status = 'Not sent';
+    return record;
+  }
+
+  function savePoConfirmation(poNumber, field, value) {
+    const record = poConfirmation(poNumber);
+    if (field === 'status') record.status = value;
+    if (field === 'notes') record.notes = value;
+    persistDemoState();
+  }
+
+  function savePoLineReadyDate(poNumber, lineId, value) {
+    const record = poConfirmation(poNumber);
+    if (value) record.readyDates[lineId] = value;
+    else delete record.readyDates[lineId];
+    persistDemoState();
+  }
+
+  function followUpPlanningTags(po) {
+    const confirmation = state.poConfirmations[po.po] || { readyDates: {} };
+    const tags = [];
+    let needsPlan = false;
+    let needsChase = false;
+    po.lines.forEach((line) => {
+      if (unplannedUnitsForLine(line) <= 0) return;
+      const readyDate = (confirmation.readyDates && confirmation.readyDates[line.id]) || '';
+      if (readyDate && readyDate >= AS_OF) needsPlan = true;
+      else needsChase = true;
+    });
+    if (needsPlan) tags.push(renderTag('wn', 'Ariel needs to plan', 'At least one unplanned line has a ready date set.'));
+    if (needsChase) tags.push(renderTag('bad', 'Vendor needs a chase', 'At least one unplanned line has no ready date, or its ready date has passed.'));
+    return tags;
+  }
+
+  function renderPoVendorConfirmation(po) {
+    const confirmation = poConfirmation(po.po);
+    return `
+      <div class="po-confirmation-block">
+        <div class="row">
+          <h3>Vendor confirmation</h3>
+          <span class="sub">Saved in this browser</span>
+        </div>
+        <div class="po-confirmation-grid">
+          <label class="cf">
+            <span>Confirmation</span>
+            <select data-po-confirmation="${attr(po.po)}">
+              ${VENDOR_CONFIRMATION_STATUSES.map((status) => `<option value="${attr(status)}"${confirmation.status === status ? ' selected' : ''}>${esc(status)}</option>`).join('')}
+            </select>
+          </label>
+          <label class="cf po-confirmation-notes">
+            <span>Notes</span>
+            <textarea data-po-notes="${attr(po.po)}" rows="2" placeholder="Vendor confirmation notes…">${esc(confirmation.notes || '')}</textarea>
+          </label>
+        </div>
+        ${po.lines.length ? `
+          <div class="sc po-ready-scroll">
+            <table class="compact-table">
+              <thead><tr><th>ITEM</th><th>DESCRIPTION</th><th>READY DATE</th><th>UNPLANNED</th></tr></thead>
+              <tbody>
+                ${po.lines.map((line) => {
+                  const readyDate = confirmation.readyDates[line.id] || '';
+                  const unplanned = unplannedUnitsForLine(line);
+                  return `
+                    <tr>
+                      <td class="mono">${esc(line.itemId || '—')}</td>
+                      <td>${esc(line.description || '—')}</td>
+                      <td><input type="date" data-po-line-ready="${attr(po.po)}:${line.id}" value="${attr(readyDate)}"></td>
+                      <td class="n">${unplanned > 0 ? `<span class="late">${formatNumber(unplanned)}</span>` : '0'}</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>` : ''}
+      </div>`;
+  }
+
+  function renderPoContainers(po) {
+    const blocks = [];
+    state.plannerContainers.forEach((container) => {
+      const matching = container.assignments
+        .map((assignment, index) => {
+          const line = lineById.get(assignment.lineId);
+          return line && line.po === po.po ? { assignment, index } : null;
+        })
+        .filter(Boolean);
+      if (!matching.length) return;
+      blocks.push({
+        container,
+        assignments: matching,
+      });
+    });
+
+    return `
+      <div class="po-containers-block">
+        <div class="row">
+          <h3>Containers</h3>
+          <span class="sub">Blocks assigned to this PO</span>
+        </div>
+        ${blocks.length ? `
+          <div class="sc">
+            <table class="compact-table">
+              <thead><tr><th>CONTAINER</th><th>TYPE</th><th>BLOCKS</th><th class="n">UNITS</th><th>STATUS</th></tr></thead>
+              <tbody>
+                ${blocks.map(({ container, assignments }) => {
+                  const statusKey = containerStatusKey(container);
+                  const status = CONTAINER_STATUSES[statusKey];
+                  return `
+                    <tr>
+                      <td><a href="#containers/${encodeURIComponent(container.id)}" data-action="open-container:${attr(container.id)}"><b>${esc(container.name)}</b></a></td>
+                      <td>${esc(container.type)}</td>
+                      <td>${assignments.map(({ assignment }) => renderTag('', assignment.block || 'B1')).join(' ')}</td>
+                      <td class="n">${formatNumber(assignments.reduce((sum, { assignment }) => sum + assignment.units, 0))}</td>
+                      <td>${renderTag(status.variant, status.label)}</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>` : '<div class="sub">This PO has no container blocks yet.</div>'}
+      </div>`;
   }
 
   /* =========================================================================
@@ -3137,7 +3579,7 @@
               const unplanned = unplannedUnitsForPo(po);
               return `
                 <tr>
-                  <td><b>${esc(po.po)}</b>${summary.old ? ` ${renderTag('wn', 'Old')}` : ''}${shipped > 0 ? ` ${renderTag('info', 'In container', 'Some or all open units are on a container marked Shipped.')}` : ''}</td>
+                  <td><b>${esc(po.po)}</b>${summary.old ? ` ${renderTag('wn', 'Old')}` : ''}${shipped > 0 ? ` ${renderTag('info', 'In container', 'Some or all open units are on a container marked Shipped.')}` : ''}${followUpPlanningTags(po).join(' ')}</td>
                   <td title="${attr(purchaserTitle(po.purchaser))}">${esc(po.buyer || '—')}</td>
                   <td class="n">${formatNumber(summary.openLines)}</td>
                   <td class="n">${formatValue(summary.openValue)}</td>
@@ -3362,19 +3804,15 @@
      ========================================================================= */
 
   const NAVIGATION = [
-    ['WORKSPACE', [['home', 'Dashboard']]],
-    ['PROCURE', [
+    ['OVERVIEW', [['home', 'Dashboard']]],
+    ['ACT', [
+      ['followup', 'Follow-ups'],
+      ['containers', 'Containers'],
+    ]],
+    ['ORDERS', [
       ['orders', 'Purchase orders'],
       ['vendors', 'Vendors'],
-      ['shipments', 'Shipments'],
-      ['vendor-updates', 'Vendor updates'],
-      ['planner', 'Planner'],
     ]],
-    ['RECEIVE', [
-      ['receive', 'Receive one receipt'],
-      ['import', 'Import packing list'],
-    ]],
-    ['ACT', [['followup', 'Follow-ups']]],
   ];
 
   function followUpCount() {
@@ -3410,13 +3848,45 @@
     home: renderHome,
     orders: renderOrders,
     vendors: renderVendors,
-    shipments: renderShipments,
-    'vendor-updates': renderVendorUpdates,
-    planner: renderPlanner,
-    receive: renderReceive,
-    import: renderImport,
+    containers: renderContainers,
     followup: renderFollowUps,
   };
+
+  const LEGACY_ROUTES = {
+    planner: 'containers',
+    shipments: 'containers',
+    import: 'containers',
+    receive: 'containers',
+    'vendor-updates': 'containers',
+  };
+
+  function normalizeLegacyRoute() {
+    const raw = location.hash.slice(1);
+    const base = raw.split('/')[0];
+    if (!LEGACY_ROUTES[base]) return;
+    if (base === 'shipments') state.containersView = 'water';
+    else state.containersView = 'plan';
+    try {
+      window.history.replaceState(null, '', '#containers');
+    } catch (error) {
+      location.hash = 'containers';
+    }
+  }
+
+  function parseRoute() {
+    const raw = location.hash.slice(1);
+    if (!raw) return { view: 'home', detailId: '' };
+    const slash = raw.indexOf('/');
+    const base = slash >= 0 ? raw.slice(0, slash) : raw;
+    const detailId = slash >= 0 ? decodeURIComponent(raw.slice(slash + 1)) : '';
+    if (base === 'containers') return { view: 'containers', detailId };
+    if (LEGACY_ROUTES[base]) return { view: 'containers', detailId: '' };
+    return { view: VIEWS[base] ? base : 'home', detailId: '' };
+  }
+
+  function currentContainerDetailId() {
+    return parseRoute().detailId;
+  }
 
   let toastTimer = null;
 
@@ -3431,8 +3901,7 @@
   }
 
   function currentView() {
-    const key = location.hash.slice(1);
-    return VIEWS[key] ? key : 'home';
+    return parseRoute().view;
   }
 
   function setView(view) {
@@ -3443,6 +3912,29 @@
     }
   }
 
+  function openContainerDetail(key) {
+    const record = findContainerRecord(key);
+    if (!record) {
+      showToast('That container is not available.');
+      return;
+    }
+    state.containersView = record.kind === 'real'
+      ? (realGroupReceived(record.group) ? 'arrived' : 'water')
+      : (containerStatusKey(record.container) === 'arrived'
+        ? 'arrived'
+        : containerStatusKey(record.container) === 'shipped' ? 'water' : 'plan');
+    state.containersReturnScroll = parseRoute().view === 'containers' ? window.scrollY : 0;
+    const nextHash = `containers/${encodeURIComponent(record.key)}`;
+    if (location.hash === `#${nextHash}`) render();
+    else location.hash = nextHash;
+  }
+
+  function closeContainerDetail() {
+    if (!currentContainerDetailId()) return;
+    if (location.hash === '#containers') render();
+    else location.hash = 'containers';
+  }
+
   function syncGlobalFilters() {
     const vendor = document.getElementById('vendor-filter');
     const buyer = document.getElementById('buyer-filter');
@@ -3451,7 +3943,11 @@
   }
 
   function render() {
-    const viewKey = currentView();
+    normalizeLegacyRoute();
+    const route = parseRoute();
+    const viewKey = route.view;
+    const detailId = route.detailId;
+    const previousDetailId = state.lastRenderedDetailId;
 
     renderNavigation(viewKey);
     syncGlobalFilters();
@@ -3468,15 +3964,24 @@
       if (portSelect) portSelect.value = state.portFilter;
     }
 
-    if (viewKey === 'shipments') {
-      updateShipmentList();
+    if (viewKey === 'containers') {
+      if (state.containersView === 'plan') bindPlannerDragAndDrop();
+      if (detailId && !previousDetailId) {
+        const scroll = window.scrollY;
+        if (state.containersReturnScroll == null) state.containersReturnScroll = scroll;
+        if (window.matchMedia('(max-width: 900px)').matches) {
+          setTimeout(() => window.scrollTo({ top: 0 }), 0);
+        }
+      }
+      if (!detailId && previousDetailId) {
+        const restore = state.containersReturnScroll || 0;
+        state.containersReturnScroll = null;
+        setTimeout(() => window.scrollTo({ top: restore }), 0);
+      }
     }
 
-    if (viewKey === 'vendor-updates') {
-      updateVendorUpdatePoMeta();
-    }
-
-    if (viewKey === 'planner') bindPlannerDragAndDrop();
+    state.lastRenderedDetailId = detailId;
+    persistDemoState();
   }
 
   /* =========================================================================
@@ -3526,19 +4031,101 @@
         break;
 
       case 'ship-on-way':
-        state.shipmentStatus = 'In transit';
-        state.shipmentQuery = '';
-        state.shipmentType = '';
-        state.shipmentPage = 1;
-        setView('shipments');
+      case 'containers-water':
+        state.containersView = 'water';
+        if (action === 'ship-on-way') state.containersStatus = 'In transit';
+        else state.containersStatus = '';
+        state.containersQuery = '';
+        state.containersType = '';
+        state.containersPage = 1;
+        setView('containers');
         break;
 
-      case 'shipments-all':
-        state.shipmentStatus = '';
-        state.shipmentQuery = '';
-        state.shipmentType = '';
-        state.shipmentPage = 1;
-        setView('shipments');
+      case 'containers-plan':
+        state.containersView = 'plan';
+        state.containersPage = 1;
+        setView('containers');
+        break;
+
+      case 'containers-arrived':
+        state.containersView = 'arrived';
+        state.containersStatus = '';
+        state.containersPage = 1;
+        setView('containers');
+        break;
+
+      case 'container-view':
+        state.containersView = ['plan', 'water', 'arrived'].includes(args[0]) ? args[0] : 'plan';
+        state.containersPage = 1;
+        state.containersStatus = '';
+        state.containersQuery = '';
+        state.containersType = '';
+        if (currentContainerDetailId()) closeContainerDetail();
+        else render();
+        break;
+
+      case 'containers-page':
+        state.containersPage = Number(args[0]) || 1;
+        updateContainersList();
+        break;
+
+      case 'toggle-container-group': {
+        const key = args.join(':');
+        if (state.expandedContainerGroups.has(key)) state.expandedContainerGroups.delete(key);
+        else state.expandedContainerGroups.add(key);
+        updateContainersList();
+        break;
+      }
+
+      case 'containers-expand-all': {
+        filteredContainerRows(state.containersView)
+          .filter((row) => row.kind === 'real')
+          .slice((state.containersPage - 1) * state.containersPageSize, state.containersPage * state.containersPageSize)
+          .forEach((row) => state.expandedContainerGroups.add(row.key));
+        updateContainersList();
+        break;
+      }
+
+      case 'containers-collapse-all':
+        state.expandedContainerGroups.clear();
+        updateContainersList();
+        break;
+
+      case 'open-container':
+        openContainerDetail(args.join(':'));
+        break;
+
+      case 'close-container':
+        closeContainerDetail();
+        break;
+
+      case 'reset-demo':
+        resetDemoData();
+        break;
+
+      case 'confirm-ship-as-planned':
+        confirmContainerShipping(args[0]);
+        break;
+
+      case 'edit-shipped-line':
+        editShippedLine(args[0], args[1]);
+        break;
+
+      case 'cancel-shipped-line':
+        state.shippingLineEdit = '';
+        render();
+        break;
+
+      case 'save-shipped-line':
+        saveShippedLine(args[0], args[1]);
+        break;
+
+      case 'arrive-real':
+        markRealContainerArrived(args.join(':'));
+        break;
+
+      case 'remove-container-document':
+        removeContainerDocument(args[0], Number(args[1]));
         break;
 
       case 'vendors-all':
@@ -3559,29 +4146,10 @@
         setView('orders');
         break;
 
-      case 'vendor-update':
-        state.vendorUpdatePo = args[0] || '';
-        state.vendorUpdateQuery = args[0] || '';
-        state.vendorUpdateStatus = '';
-        setView('vendor-updates');
-        break;
-
-      case 'save-vendor-update':
-        saveVendorUpdate();
-        break;
-
-      case 'delete-vendor-update':
-        deleteVendorUpdate(args[0]);
-        break;
-
-      case 'clear-vendor-update-form':
-        clearVendorUpdateForm();
-        break;
-
       case 'openpo': {
         const po = args[0] ? poById.get(args[0]) : null;
-        // Shipments shows all receipts, including Other/Domestic POs. If the
-        // link points outside the current segment, move to that PO's segment so
+        // Container/receipt links can include Other/Domestic POs. If the link
+        // points outside the current segment, move to that PO's segment so
         // the explicit navigation never lands on an empty order list.
         if (po && state.segmentFilter !== 'all' && po.segment !== state.segmentFilter) {
           state.segmentFilter = po.segment;
@@ -3614,44 +4182,6 @@
         state.orderBucketFilter = '';
         state.orderPage = 1;
         updateOrderTable();
-        break;
-
-      case 'ship-status': {
-        const status = args[0] || '';
-        state.shipmentStatus = state.shipmentStatus === status ? '' : status;
-        state.shipmentPage = 1;
-        updateShipmentList();
-        const select = document.getElementById('shipment-status');
-        if (select) select.value = state.shipmentStatus;
-        break;
-      }
-
-      case 'ship-page':
-        state.shipmentPage = Number(args[0]) || 1;
-        updateShipmentList();
-        break;
-
-      case 'toggle-ship-group': {
-        const key = args.join(':');
-        if (state.expandedShipmentGroups.has(key)) state.expandedShipmentGroups.delete(key);
-        else state.expandedShipmentGroups.add(key);
-        updateShipmentList();
-        break;
-      }
-
-      case 'ship-expand-all': {
-        const groups = shipmentGroups();
-        const start = (state.shipmentPage - 1) * state.shipmentPageSize;
-        groups.slice(start, start + state.shipmentPageSize).forEach((group) => {
-          state.expandedShipmentGroups.add(group.key);
-        });
-        updateShipmentList();
-        break;
-      }
-
-      case 'ship-collapse-all':
-        state.expandedShipmentGroups.clear();
-        updateShipmentList();
         break;
 
       case 'add-container':
@@ -3688,14 +4218,6 @@
 
       case 'cancel-planner-assignment':
         cancelPlannerAssignment();
-        break;
-
-      case 'confirm-receive':
-        confirmReceive();
-        break;
-
-      case 'apply-import':
-        applyImport();
         break;
 
       case 'remind': {
@@ -3757,7 +4279,7 @@
   }
 
   document.addEventListener('click', (event) => {
-    /* Planner: select a line, then tap a container. */
+    /* Container plan: select a line, then tap a container. */
     const plannerLine = event.target.closest('[data-planner-line]');
     if (plannerLine && !event.target.closest('[data-action]') && !event.target.closest('input, select, textarea')) {
       const id = Number(plannerLine.dataset.plannerLine);
@@ -3800,14 +4322,15 @@
   }, true);
 
   document.addEventListener('submit', (event) => {
-    if (event.target.id !== 'vendor-update-form') return;
-    event.preventDefault();
-    saveVendorUpdate();
+    if (event.target.id === 'container-vendor-form') {
+      event.preventDefault();
+      updateFromVendorDetailsForm(event.target);
+      return;
+    }
   });
 
   let searchTimer = null;
-  let shipmentSearchTimer = null;
-  let vendorUpdateSearchTimer = null;
+  let containersSearchTimer = null;
   let plannerLineSearchTimer = null;
 
   document.addEventListener('input', (event) => {
@@ -3834,27 +4357,25 @@
       return;
     }
 
-    if (event.target.id === 'vendor-update-search') {
-      clearTimeout(vendorUpdateSearchTimer);
+    if (event.target.id === 'containers-search') {
+      clearTimeout(containersSearchTimer);
       const value = event.target.value;
-      vendorUpdateSearchTimer = setTimeout(() => {
-        state.vendorUpdateQuery = value;
-        updateVendorUpdateList();
+      containersSearchTimer = setTimeout(() => {
+        state.containersQuery = value;
+        state.containersPage = 1;
+        updateContainersList();
       }, 200);
       return;
     }
-
-    if (event.target.id !== 'shipment-search') return;
-    clearTimeout(shipmentSearchTimer);
-    const value = event.target.value;
-    shipmentSearchTimer = setTimeout(() => {
-      state.shipmentQuery = value;
-      state.shipmentPage = 1;
-      updateShipmentList();
-    }, 200);
   });
 
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && currentContainerDetailId()) {
+      event.preventDefault();
+      closeContainerDetail();
+      return;
+    }
+
     if (event.target.id === 'planner-container-type' && event.key === 'Enter') {
       event.preventDefault();
       addPlannerContainer(event.target.value);
@@ -3882,6 +4403,43 @@
   document.addEventListener('change', (event) => {
     if (updateContainerFieldFromEvent(event)) return;
 
+    const dataset = event.target.dataset || {};
+    if (dataset.containerName) {
+      const container = state.plannerContainers.find((row) => row.id === dataset.containerName);
+      if (container) {
+        const previous = container.name;
+        container.name = String(event.target.value || '').trim() || container.id;
+        if (state.vendorDetails[container.id] && state.vendorDetails[container.id].tracking === previous) {
+          state.vendorDetails[container.id].tracking = container.name;
+        }
+        persistDemoState();
+        render();
+        showToast(`Container ID changed to ${container.name}.`);
+      }
+      return;
+    }
+
+    if (dataset.poConfirmation) {
+      savePoConfirmation(dataset.poConfirmation, 'status', event.target.value);
+      return;
+    }
+
+    if (dataset.poNotes) {
+      savePoConfirmation(dataset.poNotes, 'notes', event.target.value);
+      return;
+    }
+
+    if (dataset.poLineReady) {
+      const [poNumber, lineId] = dataset.poLineReady.split(':');
+      savePoLineReadyDate(poNumber, lineId, event.target.value);
+      return;
+    }
+
+    if (dataset.containerDocument) {
+      addContainerDocuments(dataset.containerDocument, event.target.files);
+      return;
+    }
+
     switch (event.target.id) {
       case 'vendor-filter':
         state.vendorFilter = event.target.value;
@@ -3893,16 +4451,6 @@
         state.buyerFilter = event.target.value;
         state.orderPage = 1;
         render();
-        break;
-
-      case 'vendor-update-po':
-        state.vendorUpdatePo = event.target.value;
-        updateVendorUpdatePoMeta();
-        break;
-
-      case 'vendor-update-status-filter':
-        state.vendorUpdateStatus = event.target.value;
-        updateVendorUpdateList();
         break;
 
       case 'order-status':
@@ -3930,27 +4478,16 @@
         updateOrderTable();
         break;
 
-      case 'shipment-type':
-        state.shipmentType = event.target.value;
-        state.shipmentPage = 1;
-        updateShipmentList();
+      case 'containers-type':
+        state.containersType = event.target.value;
+        state.containersPage = 1;
+        updateContainersList();
         break;
 
-      case 'shipment-status':
-        state.shipmentStatus = event.target.value;
-        state.shipmentPage = 1;
-        updateShipmentList();
-        break;
-
-      case 'receive-receipt':
-        state.receiveReceiptId = event.target.value;
-        render();
-        break;
-
-      case 'import-document':
-        state.importGroupKey = event.target.value;
-        state.importPreview = null;
-        render();
+      case 'containers-status':
+        state.containersStatus = event.target.value;
+        state.containersPage = 1;
+        updateContainersList();
         break;
 
       default:
@@ -3984,7 +4521,9 @@
   });
 
   state.vendorUpdates = loadVendorUpdates();
-  state.vendorUpdateSequence = state.vendorUpdates.length;
+  loadDemoState();
+  migrateLegacyVendorUpdates();
+  syncPlannerAssigned();
   populateFilters();
   render();
 })();
