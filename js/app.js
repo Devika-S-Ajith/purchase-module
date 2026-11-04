@@ -23,6 +23,7 @@
   const HEALTH = DATA.health;
   const AS_OF = DATA.asOf;
   const AS_OF_LABEL = '2 Nov 2026';
+  const TRACKING_UNAVAILABLE = 'Tracking number unavailable';
 
   const SEGMENT_LABELS = {
     import: 'Import',
@@ -304,12 +305,40 @@
     return vendorId || '—';
   }
 
+  function vendorName(vendorId) {
+    const id = String(vendorId || '');
+    return (DATA.vendorNames && DATA.vendorNames[id]) || '';
+  }
+
+  function vendorCode(vendorId) {
+    const id = String(vendorId || '');
+    return (DATA.vendorCodes && DATA.vendorCodes[id]) || '';
+  }
+
+  function vendorSearchText(vendorId) {
+    return [vendorId, vendorCode(vendorId), vendorName(vendorId), vendorId === '(blank)' ? 'blank unassigned vendor' : '']
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+  }
+
   function normalizeTracking(value) {
     return String(value || '').trim().replace(/-W$/i, '').toUpperCase();
   }
 
   function isContainerShaped(value) {
     return /^[A-Z]{4}\d{7}$/.test(normalizeTracking(value));
+  }
+
+  function isOrderReference(value) {
+    return /\b(?:order|sample|cancel(?:led)?|prepaid|tbd|unknown)\b/i.test(String(value || ''));
+  }
+
+  function safeContainerName(value, id, fallback = '') {
+    const raw = String(value || '').trim();
+    if (raw && !isOrderReference(raw)) return raw;
+    if (fallback) return fallback;
+    return id && id.startsWith('C-') ? `Container ${id.slice(2)}` : (id || 'Unassigned');
   }
 
   function receiptContainerKey(receipt) {
@@ -324,6 +353,11 @@
     vendorFilter: '',
     buyerFilter: '',
     segmentFilter: 'all',
+    coverageModalOpen: false,
+
+    vendorQuery: '',
+    vendorPage: 1,
+    vendorPageSize: 25,
 
     searchQuery: '',
     statusFilter: '',
@@ -391,7 +425,11 @@
 
     return {
       id,
-      name: String((raw && (raw.name || raw.containerName)) || (id.startsWith('C-') ? `Container ${id.slice(2)}` : id)),
+      name: safeContainerName(
+        raw && (raw.name || raw.containerName),
+        id,
+        id.startsWith('C-') ? `Container ${id.slice(2)}` : id
+      ),
       type,
       capacity,
       status: CONTAINER_STATUSES[raw && raw.status] ? raw.status : 'draft',
@@ -853,11 +891,14 @@
     if (!summary.nextReceipt) return '<span class="sub">No receipt</span>';
     const receipt = summary.nextReceipt;
     const key = receiptContainerKey(receipt);
-    const tracking = normalizeTracking(receipt.tracking) || 'No tracking no.';
+    const tracking = normalizeTracking(receipt.tracking);
     const type = receipt.type || '-';
+    const trackingCell = tracking
+      ? `<a class="mono" href="#containers/${encodeURIComponent(key)}" data-action="open-container:${attr(key)}">${esc(tracking)}</a>`
+      : `<span class="sub">${esc(TRACKING_UNAVAILABLE)}</span>`;
     return `
-      <a class="mono" href="#containers/${encodeURIComponent(key)}" data-action="open-container:${attr(key)}">${esc(tracking)}</a>
-      <span class="sub">· ${esc(type)} · ${formatNumber(summary.receiptCount)} shipment${summary.receiptCount === 1 ? '' : 's'}</span>`;
+      ${trackingCell}
+      <span class="sub">· ${esc(type)} · ${formatNumber(summary.receiptCount)} shipment${summary.receiptCount === 1 ? '' : 's'}</span>${receipt.reference ? `<span class="sub">Reference: ${esc(receipt.reference)}</span>` : ''}`;
   }
 
   function vendorStats(rows) {
@@ -941,17 +982,17 @@
     const coverageTotal = rows.length;
     const coveragePct = (value) => (coverageTotal ? (value / coverageTotal) * 100 : 0);
     const coverage = [
-      ['Received', totals.receivedPos, '#5b8f4a'],
-      ['In transit', totals.inTransitPos, '#3b82c4'],
-      ['Planned', totals.plannedPos, '#e0a030'],
-      ['Not yet planned', totals.notYetPlannedPos, '#aeb7c2'],
-      ['At risk', totals.atRiskPos, '#e5534b'],
+      ['Received', totals.receivedPos, 'var(--chart-received)'],
+      ['In transit', totals.inTransitPos, 'var(--chart-transit)'],
+      ['Planned', totals.plannedPos, 'var(--chart-planned)'],
+      ['Not yet planned', totals.notYetPlannedPos, 'var(--chart-unplanned)'],
+      ['At risk', totals.atRiskPos, 'var(--chart-risk)'],
     ];
     const notYetPlannedPct = totals.openPos
       ? Math.round((totals.notYetPlannedPos / totals.openPos) * 100)
       : 0;
-    const openValueLabel = `$${(totals.openValue / 1e6).toFixed(2)}M open value`;
-    const coverageExplanation = 'Each PO is counted once. Received POs are fully received. In transit POs have an open receipt or shipped units. At risk POs have an unplanned balance with no open receipt and are over 90 days old or previously received. Planned POs have their remaining balance in draft/booked containers; all other open POs are not yet planned.';
+    const openValueShort = `$${(totals.openValue / 1e6).toFixed(2)}M`;
+    const openValueLabel = `${openValueShort} open value`;
 
     return `
       <div class="dashboard">
@@ -973,7 +1014,8 @@
             <span class="sub">At risk</span>
             <span class="sub">No open receipt · unplanned balance</span>
           </button>
-          <button class="card kp neutral" data-action="containers-plan">
+          <button class="card kp warn" data-action="containers-plan">
+            <span class="kp-flag">Needs planning</span>
             <b>${formatNumber(totals.notYetPlannedPos)}</b>
             <span class="sub">Not yet planned</span>
             <span class="sub">${notYetPlannedPct}% of open POs</span>
@@ -982,7 +1024,7 @@
 
         <section class="card coverage-card">
           <div class="row">
-            <h2>Order coverage <span class="info-icon" tabindex="0" title="${attr(coverageExplanation)}" aria-label="Order coverage definition">i</span></h2>
+            <h2>Order coverage <button type="button" class="info-icon" data-action="open-coverage" aria-label="Order coverage definition" aria-haspopup="dialog">i</button></h2>
             <span class="sub"><b>${formatNumber(coverageTotal)}</b> POs · <b>${formatNumber(totals.openPos)}</b> open</span>
           </div>
           <div class="pipe" role="img" aria-label="Order coverage split across five PO segments">
@@ -1007,7 +1049,7 @@
               <tbody>
                 ${topVendors.map((vendor) => `
                   <tr>
-                    <td><b>${esc(vendor.vendor)}</b></td>
+                    <td><b>${esc(vendor.vendor)}</b>${vendorName(vendor.vendor) ? `<span class="sub">${esc(vendorName(vendor.vendor))}</span>` : ''}${vendorCode(vendor.vendor) ? `<span class="sub">Code: ${esc(vendorCode(vendor.vendor))}</span>` : ''}</td>
                     <td class="n">$${formatValue(vendor.openValue)}</td>
                     <td class="n">${vendor.poCount ? `${Math.round((vendor.receivedPos / vendor.poCount) * 100)}%` : '—'}</td>
                     <td class="n">${formatNumber(vendor.needsAction)}</td>
@@ -1017,53 +1059,190 @@
             </table>
           </div>
         </section>
+        ${state.coverageModalOpen ? renderCoverageModal({ totals, coverageTotal, coverage, notYetPlannedPct, openValueShort }) : ''}
       </div>`;
   }
 
-  function renderVendors() {
+  function renderCoverageModal({ totals, coverageTotal, coverage, notYetPlannedPct, openValueShort }) {
+    const notes = {
+      Received: 'Every line is received in the export (balance is zero).',
+      'In transit': 'The PO has an open receipt, or some units are already on a shipped container.',
+      Planned: 'The remaining balance sits in Draft or Booked containers.',
+      'Not yet planned': 'Open balance with no open receipt and no container plan yet. This is the amber planning gap.',
+      'At risk': 'Open balance with no open receipt, no plan, and the PO is over 90 days old or already partly received.',
+    };
+
+    return `
+      <div class="modal-backdrop coverage-backdrop" data-close-coverage>
+        <section class="modal-card coverage-modal" role="dialog" aria-modal="true" aria-labelledby="coverage-modal-title" data-modal-card>
+          <div class="modal-head">
+            <div>
+              <h2 id="coverage-modal-title">Order coverage</h2>
+              <div class="sub">How the dashboard splits POs, and what the planning quantities mean.</div>
+            </div>
+            <button type="button" class="s modal-close" data-action="close-coverage" aria-label="Close order coverage">×</button>
+          </div>
+
+          <div class="coverage-summary-grid">
+            <div><b>${formatNumber(coverageTotal)}</b><span>POs in view</span></div>
+            <div><b>${formatNumber(totals.openPos)}</b><span>Open POs</span></div>
+            <div><b>${esc(openValueShort)}</b><span>Open value</span></div>
+            <div><b>${notYetPlannedPct}%</b><span>Open POs not planned</span></div>
+          </div>
+
+          <div class="coverage-definitions">
+            <div class="coverage-definition">
+              <b>Ordered, received and remaining</b>
+              <p><b>Ordered</b> is the quantity on the PO lines. <b>Received</b> is ordered minus the PO balance in the export, clamped to the ordered quantity. <b>Remaining / open</b> is the balance still outstanding; a PO is open while that balance is greater than zero.</p>
+            </div>
+            <div class="coverage-definition">
+              <b>Coverage status</b>
+              <p>Each PO is counted once, so the five segments add up to the POs in view. At risk takes precedence when an unplanned open balance has no open receipt and the PO is old or already partly received. In transit covers open receipts or shipped units. Planned means the remaining balance is assigned to Draft or Booked containers. All other open POs are Not yet planned.</p>
+            </div>
+            <div class="coverage-definition">
+              <b>Planned vs unplanned units</b>
+              <p><b>Planned</b> units are open units assigned to Draft or Booked containers. <b>Shipped</b> units are on containers marked Shipped. <b>Unplanned</b> is open units minus planned and shipped units; it is the part of the open balance Ariel still needs to plan.</p>
+            </div>
+          </div>
+
+          <ul class="coverage-segments">
+            ${coverage.map(([label, value, colour]) => `
+              <li>
+                <i style="background:${colour}" aria-hidden="true"></i>
+                <span><b>${esc(label)}</b> <strong>${formatNumber(value)}</strong><span class="sub">${notes[label]}</span></span>
+              </li>`).join('')}
+          </ul>
+
+          <div class="coverage-note">
+            <b>Open POs</b> = In transit + Planned + Not yet planned + At risk. Received POs are not open. The amber KPI counts the Not yet planned segment; it does not add to it.
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" class="p" data-action="close-coverage">Close</button>
+          </div>
+        </section>
+      </div>`;
+  }
+
+  function vendorViewData() {
     const rows = filteredOrders({ includeHeaderOnly: false, status: '', port: '', query: '' });
-    const vendors = vendorStats(rows);
-    const openValue = vendors.reduce((sum, vendor) => sum + vendor.openValue, 0);
+    const allVendors = vendorStats(rows);
+    const query = state.vendorQuery.trim().toLowerCase();
+    const vendors = query
+      ? allVendors.filter((vendor) => vendorSearchText(vendor.vendor).includes(query))
+      : allVendors;
+    const openValue = allVendors.reduce((sum, vendor) => sum + vendor.openValue, 0);
+    return { allVendors, vendors, openValue, query };
+  }
+
+  function vendorPager(total, start, pageSize, pages) {
+    const first = total ? start + 1 : 0;
+    const last = Math.min(total, start + pageSize);
+    return `
+      <div class="row vendor-pager">
+        <span class="sub">Showing ${formatNumber(first)}–${formatNumber(last)} of ${formatNumber(total)} vendors · Page ${state.vendorPage} of ${pages}</span>
+        <span class="row pager-buttons">
+          <button class="s" data-action="vendor-page:${state.vendorPage - 1}"${state.vendorPage <= 1 ? ' disabled' : ''}>‹ Previous</button>
+          <button class="s" data-action="vendor-page:${state.vendorPage + 1}"${state.vendorPage >= pages ? ' disabled' : ''}>Next ›</button>
+        </span>
+      </div>`;
+  }
+
+  function renderVendorResults() {
+    const { vendors, query } = vendorViewData();
+    const pageSize = state.vendorPageSize;
+    const pages = Math.max(1, Math.ceil(vendors.length / pageSize));
+    state.vendorPage = Math.min(Math.max(1, state.vendorPage), pages);
+    const start = (state.vendorPage - 1) * pageSize;
+    const pageRows = vendors.slice(start, start + pageSize);
+
+    if (!vendors.length) {
+      return `
+        <div class="empty-state vendor-empty">
+          <div>
+            <b>${query ? 'No vendors match your search.' : 'No vendors match the current filters.'}</b>
+            <div class="sub" style="margin-top:4px">${query ? 'Try a different name or code, or clear the search.' : 'Clear the Vendor/Buyer filters to see all vendors.'}</div>
+            <button class="s" style="margin-top:10px" data-action="${query ? 'clear-vendor-search' : 'vendors-all'}">${query ? 'Clear search' : 'Reset filters'}</button>
+          </div>
+        </div>`;
+    }
+
+    return `
+      <div class="row vendor-results-head">
+        <span class="sub">${query ? `${formatNumber(vendors.length)} result${vendors.length === 1 ? '' : 's'} for “${esc(state.vendorQuery.trim())}”` : `${formatNumber(vendors.length)} vendors in the current filters`}</span>
+        <span class="sub">Select a vendor to open its purchase orders</span>
+      </div>
+      ${vendorPager(vendors.length, start, pageSize, pages)}
+      <div class="sc">
+        <table class="dashboard-table vendors-table">
+          <thead>
+            <tr>
+              <th>Vendor</th>
+              <th class="n">POs</th>
+              <th class="n">Open POs</th>
+              <th class="n">Open value</th>
+              <th class="n">Received %</th>
+              <th class="n">Needs action</th>
+              <th>Next ETA</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pageRows.map((vendor) => `
+              <tr${vendor.vendor === '(blank)' ? '' : ` class="lk" data-action="vendor-orders:${attr(vendor.vendor)}"`}>
+                <td><b>${esc(vendor.vendor)}</b>${vendorName(vendor.vendor) ? `<span class="sub">${esc(vendorName(vendor.vendor))}</span>` : ''}${vendorCode(vendor.vendor) ? `<span class="sub">Code: ${esc(vendorCode(vendor.vendor))}</span>` : ''}</td>
+                <td class="n">${formatNumber(vendor.poCount)}</td>
+                <td class="n">${formatNumber(vendor.openPos)}</td>
+                <td class="n">$${formatValue(vendor.openValue)}</td>
+                <td class="n">${vendor.poCount ? `${Math.round((vendor.receivedPos / vendor.poCount) * 100)}%` : '—'}</td>
+                <td class="n">${formatNumber(vendor.needsAction)}</td>
+                <td>${vendor.nextEta ? `<b>${formatDate(vendor.nextEta)}</b><span class="sub">${esc(relativeEta(vendor.nextEta))}</span>` : '—'}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${vendorPager(vendors.length, start, pageSize, pages)}`;
+  }
+
+  function updateVendorResults() {
+    const host = document.getElementById('vendor-results-host');
+    if (!host) return;
+    host.innerHTML = renderVendorResults();
+    const clear = document.querySelector('[data-action="clear-vendor-search"]');
+    if (clear) clear.disabled = !state.vendorQuery;
+  }
+
+  function renderVendors() {
+    const { allVendors, openValue } = vendorViewData();
 
     return `
       ${renderHeader(
         'Vendors',
-        `All vendors in the current filters. Received % is the share of POs fully received. Data as of ${AS_OF_LABEL}.`,
-        `<div class="sub">${formatNumber(vendors.length)} vendors · $${formatValue(openValue)} open value</div>`
+        `Search by vendor name or code/ID. The list follows the current Vendor and Buyer filters. Received % is the share of POs fully received. Data as of ${AS_OF_LABEL}.`,
+        `<div class="sub">${formatNumber(allVendors.length)} vendors · $${formatValue(openValue)} open value</div>`
       )}
 
       <section class="card vendors-card">
         <div class="row section-head">
           <h2>All vendors</h2>
-          <span class="sub">Select a vendor to open its purchase orders</span>
+          <span class="sub">Plain-language names are shown under each vendor code.</span>
         </div>
-        <div class="sc">
-          <table class="dashboard-table vendors-table">
-            <thead>
-              <tr>
-                <th>Vendor</th>
-                <th class="n">POs</th>
-                <th class="n">Open POs</th>
-                <th class="n">Open value</th>
-                <th class="n">Received %</th>
-                <th class="n">Needs action</th>
-                <th>Next ETA</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${vendors.map((vendor) => `
-                <tr${vendor.vendor === '(blank)' ? '' : ` class="lk" data-action="vendor-orders:${attr(vendor.vendor)}"`}>
-                  <td><b>${esc(vendor.vendor)}</b></td>
-                  <td class="n">${formatNumber(vendor.poCount)}</td>
-                  <td class="n">${formatNumber(vendor.openPos)}</td>
-                  <td class="n">$${formatValue(vendor.openValue)}</td>
-                  <td class="n">${vendor.poCount ? `${Math.round((vendor.receivedPos / vendor.poCount) * 100)}%` : '—'}</td>
-                  <td class="n">${formatNumber(vendor.needsAction)}</td>
-                  <td>${vendor.nextEta ? `<b>${formatDate(vendor.nextEta)}</b><span class="sub">${esc(relativeEta(vendor.nextEta))}</span>` : '—'}</td>
-                </tr>`).join('')}
-            </tbody>
-          </table>
+        <div class="card row vendor-toolbar" style="justify-content:flex-start">
+          <input
+            type="search"
+            id="vendor-search"
+            placeholder="Search vendor name or code/ID"
+            value="${attr(state.vendorQuery)}"
+            autocomplete="off"
+          >
+          <select id="vendor-page-size" aria-label="Vendors per page">
+            <option value="25"${state.vendorPageSize === 25 ? ' selected' : ''}>25 / page</option>
+            <option value="50"${state.vendorPageSize === 50 ? ' selected' : ''}>50 / page</option>
+            <option value="100"${state.vendorPageSize === 100 ? ' selected' : ''}>100 / page</option>
+          </select>
+          <button class="s" data-action="clear-vendor-search"${state.vendorQuery ? '' : ' disabled'}>Clear search</button>
+          ${state.vendorFilter || state.buyerFilter ? '<button class="s" data-action="vendors-all">Reset filters</button>' : ''}
         </div>
+        <div id="vendor-results-host">${renderVendorResults()}</div>
       </section>`;
   }
 
@@ -1325,7 +1504,11 @@
                       <td>${renderReceiptStatusTag(receipt)}</td>
                       <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
                       <td>${renderReceiptReceivedDate(receipt)}</td>
-                      <td><a class="mono" href="#containers/${encodeURIComponent(receiptContainerKey(receipt))}" data-action="open-container:${attr(receiptContainerKey(receipt))}">${esc(normalizeTracking(receipt.tracking) || 'No tracking no.')}</a>${receipt.containerId ? `<br><span class="sub">Container ${esc(receipt.containerId)}</span>` : ''}</td>
+                      <td>${normalizeTracking(receipt.tracking)
+                        ? `<a class="mono" href="#containers/${encodeURIComponent(receiptContainerKey(receipt))}" data-action="open-container:${attr(receiptContainerKey(receipt))}">${esc(normalizeTracking(receipt.tracking))}</a>`
+                        : `<span class="sub">${esc(TRACKING_UNAVAILABLE)}</span>`}
+                        ${receipt.reference ? `<br><span class="sub">Reference: ${esc(receipt.reference)}</span>` : ''}
+                        ${receipt.containerId ? `<br><span class="sub">Container ${esc(receipt.containerId)}</span>` : ''}</td>
                       <td>${esc(receipt.type || '—')}</td>
                       <td title="${attr(warehouse.title)}">${esc(warehouse.label)}</td>
                       <td>${esc(receipt.matchType || '—')}</td>
@@ -1502,7 +1685,7 @@
     const defaultName = `Container ${state.plannerContainerSequence + 1}`;
     const name = !typed || Object.keys(CONTAINER_TYPES).some((key) => typed.toLowerCase() === key.toLowerCase())
       ? defaultName
-      : typed;
+      : safeContainerName(typed, `C-${state.plannerContainerSequence + 1}`, defaultName);
 
     const sequence = state.plannerContainerSequence + 1;
     state.plannerContainerSequence = sequence;
@@ -1957,7 +2140,7 @@
         groups.set(key, {
           key,
           tracking,
-          label: tracking || 'No tracking no.',
+          label: tracking || TRACKING_UNAVAILABLE,
           isContainer: isContainerShaped(tracking),
           isBlank: !tracking,
           receipts: [],
@@ -2035,6 +2218,7 @@
         receipt.matchPo,
         receipt.vendorId,
         receipt.type,
+        receipt.reference,
       ]),
     ].filter(Boolean).join(' ').toLowerCase();
   }
@@ -2583,7 +2767,7 @@
             <tbody>
               ${group.receipts.map((receipt) => `
                 <tr>
-                  <td class="mono">${esc(receipt.invoiceNo)}</td>
+                  <td class="mono">${esc(receipt.invoiceNo)}${receipt.reference ? `<div class="sub">Reference: ${esc(receipt.reference)}</div>` : ''}</td>
                   <td>${receipt.matchPo ? `<a href="#orders" data-action="openpo:${attr(receipt.matchPo)}"><b>${esc(receipt.matchPo)}</b></a>` : '<span class="sub">No matching PO</span>'}</td>
                   <td>${esc(receipt.vendorId || '—')}</td>
                   <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<div class="sub">${esc(relativeEta(receipt.etaDate))}</div>` : '—'}</td>
@@ -3056,8 +3240,8 @@
       <section class="card untracked-receipts">
         <div class="row">
           <div>
-            <h2>Receipts without a tracking number</h2>
-            <div class="sub">Kept from the receipt export. They are receipts, not containers, so they are excluded from the container counts.</div>
+            <h2>Receipts without a real tracking number</h2>
+            <div class="sub">Kept from the receipt export, with any order note preserved as a reference. They are receipts, not containers, so they are excluded from the container counts.</div>
           </div>
           ${renderTag('wn', `${formatNumber(groups.reduce((sum, group) => sum + group.receipts.length, 0))} receipts`)}
         </div>
@@ -3067,7 +3251,7 @@
             <tbody>
               ${groups.flatMap((group) => group.receipts.map((receipt) => `
                 <tr>
-                  <td class="mono">${esc(receipt.invoiceNo)}<div class="sub">${esc(receipt.type || '—')}</div></td>
+                  <td class="mono">${esc(receipt.invoiceNo)}<div class="sub">${esc(receipt.type || '—')}</div>${receipt.reference ? `<div class="sub">Reference: ${esc(receipt.reference)}</div>` : ''}</td>
                   <td>${receipt.matchPo ? `<a href="#orders" data-action="openpo:${attr(receipt.matchPo)}"><b>${esc(receipt.matchPo)}</b></a>` : '<span class="sub">No matching PO</span>'}</td>
                   <td>${esc(receipt.vendorId || '—')}</td>
                   <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<div class="sub">${esc(relativeEta(receipt.etaDate))}</div>` : '—'}</td>
@@ -4105,6 +4289,7 @@
     const detailId = route.detailId;
     const previousDetailId = state.lastRenderedDetailId;
 
+    if (viewKey !== 'home') state.coverageModalOpen = false;
     renderNavigation(viewKey);
     syncGlobalFilters();
 
@@ -4286,7 +4471,38 @@
         state.vendorFilter = '';
         state.buyerFilter = '';
         state.segmentFilter = 'all';
+        state.vendorQuery = '';
+        state.vendorPage = 1;
         setView('vendors');
+        break;
+
+      case 'vendor-page':
+        state.vendorPage = Number(args[0]) || 1;
+        updateVendorResults();
+        break;
+
+      case 'clear-vendor-search':
+        state.vendorQuery = '';
+        state.vendorPage = 1;
+        {
+          const input = document.getElementById('vendor-search');
+          if (input) input.value = '';
+        }
+        updateVendorResults();
+        break;
+
+      case 'open-coverage':
+        state.coverageModalOpen = true;
+        render();
+        setTimeout(() => {
+          const close = document.querySelector('.coverage-modal [data-action="close-coverage"]');
+          if (close) close.focus();
+        }, 0);
+        break;
+
+      case 'close-coverage':
+        state.coverageModalOpen = false;
+        render();
         break;
 
       case 'vendor-orders':
@@ -4438,6 +4654,13 @@
   }
 
   document.addEventListener('click', (event) => {
+    const coverageBackdrop = event.target.closest?.('[data-close-coverage]');
+    if (coverageBackdrop && event.target === coverageBackdrop) {
+      state.coverageModalOpen = false;
+      render();
+      return;
+    }
+
     /* Container plan: select a line, then tap a container. */
     const plannerLine = event.target.closest('[data-planner-line]');
     if (plannerLine && !event.target.closest('[data-action]') && !event.target.closest('input, select, textarea')) {
@@ -4491,6 +4714,7 @@
   let searchTimer = null;
   let containersSearchTimer = null;
   let plannerLineSearchTimer = null;
+  let vendorSearchTimer = null;
 
   document.addEventListener('input', (event) => {
     if (updateContainerFieldFromEvent(event)) return;
@@ -4526,9 +4750,28 @@
       }, 200);
       return;
     }
+
+    if (event.target.id === 'vendor-search') {
+      clearTimeout(vendorSearchTimer);
+      const value = event.target.value;
+      vendorSearchTimer = setTimeout(() => {
+        state.vendorQuery = value;
+        state.vendorPage = 1;
+        updateVendorResults();
+      }, 200);
+      return;
+    }
   });
 
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.coverageModalOpen) {
+      event.preventDefault();
+      state.coverageModalOpen = false;
+      render();
+      setTimeout(() => document.querySelector('.info-icon[data-action="open-coverage"]')?.focus(), 0);
+      return;
+    }
+
     if (event.key === 'Escape' && currentContainerDetailId()) {
       event.preventDefault();
       closeContainerDetail();
@@ -4566,8 +4809,14 @@
     if (dataset.containerName) {
       const container = state.plannerContainers.find((row) => row.id === dataset.containerName);
       if (container) {
+        const nextName = String(event.target.value || '').trim();
+        if (nextName && isOrderReference(nextName)) {
+          showToast('Use a container ID or tracking number, not an order description.');
+          event.target.value = container.name;
+          return;
+        }
         const previous = container.name;
-        container.name = String(event.target.value || '').trim() || container.id;
+        container.name = safeContainerName(nextName, container.id);
         if (state.vendorDetails[container.id] && state.vendorDetails[container.id].tracking === previous) {
           state.vendorDetails[container.id].tracking = container.name;
         }
@@ -4603,13 +4852,21 @@
       case 'vendor-filter':
         state.vendorFilter = event.target.value;
         state.orderPage = 1;
+        state.vendorPage = 1;
         render();
         break;
 
       case 'buyer-filter':
         state.buyerFilter = event.target.value;
         state.orderPage = 1;
+        state.vendorPage = 1;
         render();
+        break;
+
+      case 'vendor-page-size':
+        state.vendorPageSize = Number(event.target.value) || 25;
+        state.vendorPage = 1;
+        updateVendorResults();
         break;
 
       case 'order-status':

@@ -25,6 +25,8 @@ AS_OF_DATE = dt.date.fromisoformat(AS_OF)
 PO_CSV = ROOT / "PurchPO_202611021053.csv"
 DETAIL_CSV = ROOT / "PurchPODetail_202611021056.csv"
 RECEIPT_CSV = ROOT / "PurchReceipt_202611021104.csv"
+VENDOR_CSV = ROOT / "Vendors_202611041459.csv"
+INVENTORY_CSV = ROOT / "InventoryTransactions_202611041440.csv"
 OUT_JS = ROOT / "js" / "data.js"
 
 # Only fields the prototype needs. POMemo is deliberately excluded because it
@@ -74,6 +76,7 @@ RECEIPT_COLUMNS = [
     ("etaDate", "date"),
     ("receiptDate", "date"),
     ("tracking", "str"),
+    ("reference", "str"),
     ("warehouse", "str"),
     ("type", "str"),
     ("matchPo", "str"),
@@ -192,6 +195,41 @@ def container_id(tracking: str) -> str:
     return value if re.fullmatch(r"[A-Z]{4}\d{7}", value) else ""
 
 
+def tracking_is_description(value: str) -> bool:
+    """Detect receipt rows where TrackingNumber contains an order note.
+
+    The receipt export includes values such as "ORDER CANCEL in Aug 2026" and
+    "SAMPLE ORDER in Aug 2026" in the tracking column. They are meaningful
+    references, but they are not container IDs or tracking numbers.
+    """
+    raw = text(value)
+    if not raw:
+        return False
+    if re.search(r"\b(?:order|sample|cancel(?:led)?|prepaid|tbd|unknown)\b", raw, flags=re.I):
+        return True
+    # Real tracking values are normally alphanumeric with optional -/&. A
+    # sentence-like value with spaces and lowercase words is a note.
+    return bool(" " in raw and re.search(r"[a-z]", raw))
+
+
+def inventory_maps(rows: list[dict[str, str]]) -> dict[str, str]:
+    """Map receipt invoices to the first real tracking number.
+
+    InventoryTransactions is the authoritative source for tracking numbers.
+    A PO can span more than one container, so only an invoice match is used;
+    the receipt export's own value remains the fallback when no map exists.
+    """
+    by_invoice: dict[str, str] = {}
+    for raw in rows:
+        tracking = text(raw.get("TrackingNum"))
+        if not tracking or tracking_is_description(tracking):
+            continue
+        invoice = text(raw.get("InvoiceNo"))
+        if invoice:
+            by_invoice.setdefault(invoice, tracking)
+    return by_invoice
+
+
 def purchase_display(raw: str) -> str:
     """Used only for the duplicate-purchaser data-health note."""
     return {
@@ -233,6 +271,20 @@ def main() -> None:
     po_raw = read_csv(PO_CSV)
     detail_raw = read_csv(DETAIL_CSV)
     receipt_raw = read_csv(RECEIPT_CSV)
+    inventory_raw = read_csv(INVENTORY_CSV) if INVENTORY_CSV.exists() else []
+    inventory_by_invoice = inventory_maps(inventory_raw)
+
+    vendor_names: dict[str, str] = {}
+    vendor_codes: dict[str, str] = {}
+    if VENDOR_CSV.exists():
+        for raw in read_csv(VENDOR_CSV):
+            vendor_id = text(raw.get("VendorID"))
+            vendor_name = text(raw.get("VendorName"))
+            vendor_code = text(raw.get("VendorCode"))
+            if vendor_id and vendor_name:
+                vendor_names[vendor_id] = vendor_name
+            if vendor_id and vendor_code and vendor_code.upper() != vendor_id.upper():
+                vendor_codes[vendor_id] = vendor_code
 
     po_rows: list[dict] = []
     header_pos: set[str] = set()
@@ -345,6 +397,24 @@ def main() -> None:
             }
         vendor_id = text(raw["VendorID"])
         segment = po_segment.get(match_po, "") if match_po else ("domestic" if vendor_id.upper() == "ACH" else "other")
+        original_tracking = text(raw["TrackingNumber"])
+        stripped_invoice = re.sub(r"-\d+$", "", invoice)
+        inventory_tracking = ""
+        if not invalid:
+            inventory_tracking = (
+                inventory_by_invoice.get(invoice)
+                or inventory_by_invoice.get(stripped_invoice)
+                or ""
+            )
+
+        reference = original_tracking if tracking_is_description(original_tracking) else ""
+        if inventory_tracking:
+            final_tracking = inventory_tracking
+        elif reference:
+            final_tracking = ""
+        else:
+            final_tracking = original_tracking
+
         receipt_rows.append(
             {
                 "id": number(raw["ID"]),
@@ -353,14 +423,15 @@ def main() -> None:
                 "invoiceDate": date_only(raw["InvoiceDate"]),
                 "etaDate": date_only(raw["ETADate"]),
                 "receiptDate": date_only(raw["ReceiptDate"]),
-                "tracking": text(raw["TrackingNumber"]),
+                "tracking": final_tracking,
+                "reference": reference,
                 "warehouse": text(raw["WHLocation"]),
                 "type": text(raw["ReceiptType"]),
                 "matchPo": match_po,
                 "matchType": match_type,
                 "segment": segment,
-                "containerId": container_id(raw["TrackingNumber"]),
-                "trackingKey": tracking_key(raw["TrackingNumber"]),
+                "containerId": container_id(final_tracking),
+                "trackingKey": tracking_key(final_tracking),
                 "invalid": invalid,
             }
         )
@@ -570,6 +641,11 @@ def main() -> None:
             "shared": len(shared_tracking),
             "sharedDistribution": dict(Counter(shared_tracking.values())),
         },
+        "inventoryStats": {
+            "rows": len(inventory_raw),
+            "invoices": len(inventory_by_invoice),
+            "tracking": len({tracking_key(value) for value in inventory_by_invoice.values()}),
+        },
         "containerStats": {
             "distinct": len(container_counts),
             "shared": len(shared_containers),
@@ -594,7 +670,11 @@ def main() -> None:
             "po": PO_CSV.name,
             "detail": DETAIL_CSV.name,
             "receipt": RECEIPT_CSV.name,
+            "vendors": VENDOR_CSV.name if VENDOR_CSV.exists() else "",
+            "inventory": INVENTORY_CSV.name if INVENTORY_CSV.exists() else "",
         },
+        "vendorNames": vendor_names,
+        "vendorCodes": vendor_codes,
         "ports": sorted({row["port"] for row in po_rows if row["port"]}),
         "portMap": {
             port: normalise_port(port)

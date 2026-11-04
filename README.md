@@ -1,12 +1,14 @@
 # Ariel Purchasing Module (CSV-backed prototype)
 
-Self-contained browser prototype for reviewing the exported China-import purchasing data. Open `index.html` directly from disk — **no build step and no local server required**. Containers are the source of truth for planning, real shipment receipts and vendor details. Demo edits are browser-local; there is no packing-list import.
+Self-contained browser prototype for reviewing the exported China-import purchasing data. Open `index.html` directly from disk — **no build step and no local server required**. Containers are the source of truth for planning, real shipment receipts and vendor details. The interface uses the Ariel Analytics crimson and warm-white theme. Demo edits are browser-local; there is no packing-list import.
 
-## Data sources (exported 2 Nov 2026)
+## Data sources (exports dated 2–4 Nov 2026)
 
 - `PurchPO_202611021053.csv` — 5,700 PO headers
 - `PurchPODetail_202611021056.csv` — 12,034 detail lines
 - `PurchReceipt_202611021104.csv` — 681 receipt documents
+- `Vendors_202611041459.csv` — vendor names and codes/IDs
+- `InventoryTransactions_202611041440.csv` — real tracking numbers for receipt invoices
 
 ## Building the data bundle
 
@@ -16,7 +18,7 @@ Self-contained browser prototype for reviewing the exported China-import purchas
 python scripts/build_data.py
 ```
 
-The script keeps PO numbers and invoice numbers as strings (leading zeros preserved), normalises keys, matches receipts to POs (exact `InvoiceNo = PO`, then one trailing `-<digits>` stripped), derives Import / Domestic-custom / Other segments, normalises purchaser and FOB-port labels for display, excludes the invalid receipt `5131-MAC-3` from ETA logic, and emits a compact string-pooled bundle. `POMemo` is excluded; `Marking` is retained.
+The script keeps PO numbers and invoice numbers as strings (leading zeros preserved), normalises keys, matches receipts to POs (exact `InvoiceNo = PO`, then one trailing `-<digits>` stripped), derives Import / Domestic-custom / Other segments, normalises purchaser and FOB-port labels for display, excludes the invalid receipt `5131-MAC-3` from ETA logic, and emits a compact string-pooled bundle. `POMemo` is excluded; `Marking` is retained. Vendor names and alternate codes are added to the bundle from `Vendors_202611041459.csv`. Receipt tracking is reconciled by invoice against `InventoryTransactions_202611041440.csv`; when the receipt export contains an order note instead of a tracking number, the note is kept as a reference and the tracking value is left unavailable rather than invented.
 
 ## Pages and navigation
 
@@ -31,7 +33,7 @@ Old links redirect to the merged Containers page: `#planner`, `#import`, `#recei
 
 ### Dashboard
 
-Four PO-based KPIs: Open POs (including open value), In transit, At risk and Not yet planned. They use the same PO buckets as the coverage bar: Open POs = In transit + Planned + Not yet planned + At risk, while In transit, At risk and Not yet planned match their coverage segments exactly. The full-width Order coverage bar counts each PO once and splits them into Received, In transit, Planned, Not yet planned and At risk; its header also shows how many of the total POs are open.
+Four PO-based KPIs: Open POs (including open value), In transit, At risk and Not yet planned. **Not yet planned** is shown as a prominent amber planning-gap KPI. They use the same PO buckets as the coverage bar: Open POs = In transit + Planned + Not yet planned + At risk, while In transit, At risk and Not yet planned match their coverage segments exactly. The full-width Order coverage bar counts each PO once and splits them into Received, In transit, Planned, Not yet planned and At risk; its header also shows how many of the total POs are open. The **i** button opens a keyboard- and click-accessible Order coverage dialog (with close button, outside-click and Escape support) that explains ordered, received, remaining, coverage and planned versus unplanned quantities.
 
 Below it is Top 8 vendors by open value with a PO-based Received %; “View all vendors” opens the full vendor list.
 
@@ -55,7 +57,7 @@ The header’s **Reset demo data** clears only the merged Containers localStorag
 
 ### Container naming
 
-A real container ID is 4 letters followed by 7 digits after removing a trailing `-W` (for example `TCLU1234567-W` → `TCLU1234567`). Anything else is shown as **Tracking no.** with an **LCL / carrier reference** tag. Grouping uses only the normalised tracking value; no separate carrier-reference field is invented. The current export has 445 distinct normalised tracking IDs (203 in transit, 242 arrived) and 77 shared containers. The seven receipts with no tracking number are kept in a separate “Receipts without a tracking number” table and are not counted as containers. Planner-created containers use the editable **Container ID** field; adding a later real container number does not rename them.
+A real container ID is 4 letters followed by 7 digits after removing a trailing `-W` (for example `TCLU1234567-W` → `TCLU1234567`). Anything else is shown as **Tracking no.** with an **LCL / carrier reference** tag. Grouping uses only the normalised tracking value; no separate carrier-reference field is invented. The current export has 431 distinct normalised tracking IDs (194 in transit, 237 arrived), including 115 standard container IDs; 87 tracking IDs and 64 container IDs are shared across receipts. Fifteen receipts have no real tracking number (eight order notes and seven blanks) and are kept in a separate “Receipts without a real tracking number” table, where the notes appear as references and are not counted as containers. Planner-created containers use the editable **Container ID** field; adding a later real container number does not rename them. Order descriptions such as `ORDER CANCEL in Aug 2026` are rejected as container names.
 
 ### Purchase orders
 
@@ -70,7 +72,7 @@ Both blocks use the merged localStorage state.
 
 ### Vendors
 
-All vendors in the current filters, with PO counts, open POs, open value, Received % (the share of POs fully received), Needs action and Next ETA. Select a vendor to open its purchase orders.
+All vendors in the current filters, with PO counts, open POs, open value, Received % (the share of POs fully received), Needs action and Next ETA. Vendor names from the vendor master are shown under their codes/IDs. Search by name or code/ID; the search works with the Vendor and Buyer filters and resets to page 1. The pager provides Previous/Next with page/total pages, disabled edge buttons and optional 25/50/100 row pages. Search and filter changes reset to the first page, and an empty state offers Clear search or Reset filters. Select a vendor to open its purchase orders.
 
 ### Follow-ups
 
