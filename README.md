@@ -7,7 +7,8 @@ Self-contained browser prototype for reviewing the exported China-import purchas
 - `PurchPO_202611021053.csv` — 5,700 PO headers
 - `PurchPODetail_202611021056.csv` — 12,034 detail lines
 - `PurchReceipt_202611021104.csv` — 681 receipt documents
-- `Vendors_202611041459.csv` — vendor names and codes/IDs
+- `Vendors_202611041459.csv` — vendor names, codes/IDs, contact person, phone and email
+- `VendorContacts_202611041500.csv` — additional vendor contact names, phone numbers and emails
 - `InventoryTransactions_202611041440.csv` — real tracking numbers for receipt invoices
 
 ## Building the data bundle
@@ -18,7 +19,7 @@ Self-contained browser prototype for reviewing the exported China-import purchas
 python scripts/build_data.py
 ```
 
-The script keeps PO numbers and invoice numbers as strings (leading zeros preserved), normalises keys, matches receipts to POs (exact `InvoiceNo = PO`, then one trailing `-<digits>` stripped), derives Import / Domestic-custom / Other segments, normalises purchaser and FOB-port labels for display, excludes the invalid receipt `5131-MAC-3` from ETA logic, and emits a compact string-pooled bundle. `POMemo` is excluded; `Marking` is retained. Vendor names and alternate codes are added to the bundle from `Vendors_202611041459.csv`. Receipt tracking is reconciled by invoice against `InventoryTransactions_202611041440.csv`; when the receipt export contains an order note instead of a tracking number, the note is kept as a reference and the tracking value is left unavailable rather than invented.
+The script keeps PO numbers and invoice numbers as strings (leading zeros preserved), normalises keys, matches receipts to POs (exact `InvoiceNo = PO`, then one trailing `-<digits>` stripped), derives Import / Domestic-custom / Other segments, normalises purchaser and FOB-port labels for display, excludes the invalid receipt `5131-MAC-3` from ETA logic, and emits a compact string-pooled bundle. `POMemo` is excluded; `Marking` is retained. Vendor names, alternate codes and contact details are added to the bundle from `Vendors_202611041459.csv` and `VendorContacts_202611041500.csv` (main contact details take priority when present). Receipt tracking is reconciled by invoice against `InventoryTransactions_202611041440.csv`; when the receipt export contains an order note instead of a tracking number, the note is kept as a reference and the tracking value is left unavailable rather than invented.
 
 ## Pages and navigation
 
@@ -76,7 +77,7 @@ All vendors in the current filters, with PO counts, open POs, open value, Receiv
 
 ### Follow-ups
 
-Ordered categories: (1) At risk; (2) Not yet planned; (3) Open balance — already planned; (4) Past ETA; (5) Not shipped yet and Old; (6) Receipts unmatched. A category index shows the count in each section; sections and vendor groups are collapsible, with vendors highlighted and grouped with open lines/value, balance, planned, unplanned, ETA, days late, PO age and buyer. “Send reminder” opens a pre-filled draft email; clicking Send logs the reminder in the session. No email is sent.
+Ordered by urgency: At risk; Not yet planned; Past ETA; Old / not shipped; Unmatched receipts; Already planned. A category index shows the count in each section. Categories are not grouped by vendor and have no numbered headings or explanatory copy; vendor information is a column in each compact PO table alongside PO, item ID/description, open balance, ETA and action. The vendor column shows the vendor code/name, contact person, email and phone from the Vendors and VendorContacts exports. Each category previews its most urgent three or four records and shows its record and vendor counts. **View all** expands one category at a time inside a scrollable table with a sticky header, and **Show preview** returns to the compact view. The vendor and buyer filters continue to drive every category. The action column provides **Send reminder**; the draft shows the vendor email address in the To field, and clicking Send logs the reminder and recipient in the session. No email is sent. The old follow-up status tags are no longer shown in these tables.
 
 PO rows also get two planning tags: **Ariel needs to plan** when an unplanned line has a ready date, and **Vendor needs a chase** when an unplanned line has no ready date or its ready date has passed. These tags do not create new Follow-ups categories.
 
@@ -118,5 +119,5 @@ scripts/build_data.py    CSV → js/data.js generator
 
 - No data is imported or invented: container capacities are assumptions (40HC 68 CBM, 40ST 58 CBM, 20GP 28 CBM). There is no packing-list import, file parser, OCR or document ingestion. Attachments keep metadata only.
 - There is no live Google Sheets, Forms, Odoo or Ariel integration, no real email or messaging, no login/roles and no shared persistence. Reminders are logged in the session only. Demo state is stored in this browser only and is not shared across buyers or devices.
-- The CSV exports do not contain container status, sailing date, port, confirmation status, ready dates, vendor contact details or historical tracking activity; those fields exist only in this prototype and its browser-local state. Activity for real receipts is limited to recorded `ReceiptDate` arrivals.
+- The CSV exports do not contain container status, sailing date, port, confirmation status, ready dates or historical tracking activity; those fields exist only in this prototype and its browser-local state. Vendor contact details come from the Vendors and VendorContacts exports. Activity for real receipts is limited to recorded `ReceiptDate` arrivals.
 - The sidebar “Back to Ariel Analytics” is a placeholder link.

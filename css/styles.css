@@ -1610,102 +1610,169 @@ tr.total-row td {
   border-left-color: var(--mut);
 }
 
-.followup-category > summary {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  list-style: none;
-  cursor: pointer;
-}
-
-.followup-category > summary::-webkit-details-marker,
-.followup-vendor-summary::-webkit-details-marker {
-  display: none;
-}
-
-.followup-category > summary::before,
-.followup-vendor-summary::after {
-  content: '▸';
-  color: var(--mut);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.followup-category[open] > summary::before,
-.followup-vendor[open] .followup-vendor-summary::after {
-  content: '▾';
-}
-
-.followup-category > summary h2 {
-  margin: 0;
-}
-
-.followup-category > summary .sub {
-  margin-top: 4px;
-  max-width: 86ch;
-}
-
-.followup-category-count {
+.followup-category-head {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-  flex: 0 0 auto;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px 18px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
 }
 
-.followup-category-body {
-  margin-top: 14px;
-  padding-top: 2px;
-  border-top: 1px solid var(--line);
-}
-
-.vendor-block {
-  margin-top: 12px;
-  border: 1px solid var(--line);
-  border-left: 4px solid var(--acc);
-  border-radius: 10px;
-  background: var(--card);
-  padding: 0;
-  overflow: hidden;
-}
-
-.followup-vendor-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  padding: 10px 12px;
-  list-style: none;
-  cursor: pointer;
-  background: var(--bg);
-}
-
-.followup-vendor-summary h3 {
+.followup-category-title {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.followup-category-title h2 {
   margin: 0;
-  font-size: 13px;
+  font-size: 17px;
+  line-height: 1.3;
 }
 
-.vendor-pill {
-  display: inline-block;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--acc);
-  color: var(--accfg);
-  font-weight: 800;
-  letter-spacing: 0.02em;
+.followup-category-meta {
+  color: var(--mut);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.followup-vendor-body {
-  padding: 10px 12px 12px;
+.followup-category-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
-.followup-vendor-actions {
-  margin-bottom: 6px;
+.followup-preview-count {
+  color: var(--mut);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.followup-view-all {
+  white-space: nowrap;
+}
+
+.followup-category-body {
+  margin-top: 10px;
+}
+
+.followup-table-scroll {
+  max-height: 68vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.followup-table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
+}
+
+.followup-po-table {
+  min-width: 980px;
+}
+
+.followup-receipt-table {
+  min-width: 1020px;
+}
+
+.followup-po-table td,
+.followup-receipt-table td {
+  vertical-align: top;
+}
+
+.followup-po-table .sub,
+.followup-receipt-table .sub,
+.followup-vendor-cell .sub,
+.followup-item-cell .sub {
+  display: block;
+}
+
+.followup-po-number {
+  overflow-wrap: anywhere;
+}
+
+.followup-vendor-cell {
+  min-width: 180px;
+  max-width: 250px;
+}
+
+.followup-vendor-cell b {
+  overflow-wrap: anywhere;
+}
+
+.followup-vendor-cell .sub {
+  margin-top: 2px;
+}
+
+.followup-contact-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 5px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.followup-contact-link {
+  color: var(--acc-strong);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.followup-contact-link:hover {
+  text-decoration: underline;
+}
+
+.followup-contact-sep {
+  color: var(--mut);
+}
+
+.followup-reminder-button {
+  white-space: nowrap;
+}
+
+.followup-mail-to {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.followup-item-cell {
+  min-width: 230px;
+  max-width: 360px;
+}
+
+.followup-item-description {
+  display: -webkit-box;
+  margin-top: 2px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.followup-balance {
+  white-space: nowrap;
+}
+
+.followup-unit {
+  color: var(--mut);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.followup-balance .sub,
+.followup-eta .sub {
+  margin-top: 2px;
 }
 
 a {

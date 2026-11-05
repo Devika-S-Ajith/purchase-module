@@ -315,6 +315,25 @@
     return (DATA.vendorCodes && DATA.vendorCodes[id]) || '';
   }
 
+  function vendorContact(vendorId) {
+    const id = String(vendorId || '');
+    const contact = DATA.vendorContacts && DATA.vendorContacts[id];
+    return {
+      name: (contact && contact.name) || '',
+      emails: contact && Array.isArray(contact.emails) ? contact.emails.filter(Boolean) : [],
+      phone: (contact && contact.phone) || '',
+    };
+  }
+
+  function contactEmailLink(email) {
+    return `<a class="followup-contact-link" href="${attr(`mailto:${email}`)}" title="${attr(email)}">${esc(email)}</a>`;
+  }
+
+  function contactPhoneLink(phone) {
+    const dial = String(phone || '').replace(/[^\d+]/g, '');
+    return `<a class="followup-contact-link" href="${attr(`tel:${dial}`)}" title="${attr(phone)}">${esc(phone)}</a>`;
+  }
+
   function vendorSearchText(vendorId) {
     return [vendorId, vendorCode(vendorId), vendorName(vendorId), vendorId === '(blank)' ? 'blank unassigned vendor' : '']
       .filter(Boolean)
@@ -384,8 +403,7 @@
     poConfirmations: {},
 
     reminders: [],
-    followUpOpenCategories: new Set(['unplanned']),
-    followUpOpenVendors: new Set(),
+    followUpExpandedCategory: '',
     followUpReminderDraft: null,
 
     vendorUpdates: [],
@@ -3592,22 +3610,6 @@
     persistDemoState();
   }
 
-  function followUpPlanningTags(po) {
-    const confirmation = state.poConfirmations[po.po] || { readyDates: {} };
-    const tags = [];
-    let needsPlan = false;
-    let needsChase = false;
-    po.lines.forEach((line) => {
-      if (unplannedUnitsForLine(line) <= 0) return;
-      const readyDate = (confirmation.readyDates && confirmation.readyDates[line.id]) || '';
-      if (readyDate && readyDate >= AS_OF) needsPlan = true;
-      else needsChase = true;
-    });
-    if (needsPlan) tags.push(renderTag('wn', 'Ariel needs to plan', 'At least one unplanned line has a ready date set.'));
-    if (needsChase) tags.push(renderTag('bad', 'Vendor needs a chase', 'At least one unplanned line has no ready date, or its ready date has passed.'));
-    return tags;
-  }
-
   function renderPoVendorConfirmation(po) {
     const confirmation = poConfirmation(po.po);
     return `
@@ -3751,27 +3753,72 @@
     return poKeys.size + buckets.unmatched.length;
   }
 
-  function groupByVendor(rows) {
-    const grouped = new Map();
-    rows.forEach(({ po, summary }) => {
-      const key = po.vendorId || '(blank)';
-      if (!grouped.has(key)) grouped.set(key, { vendor: key, rows: [] });
-      grouped.get(key).rows.push({ po, summary });
-    });
-    return Array.from(grouped.values()).sort((a, b) => a.vendor.localeCompare(b.vendor));
-  }
-
   const FOLLOW_UP_CATEGORY_LABELS = {
     unplanned: 'At risk',
     notYetPlanned: 'Not yet planned',
-    nothing: 'Open balance — already planned',
+    nothing: 'Already planned',
     overdue: 'Past ETA',
-    old: 'Not shipped yet and Old',
-    unmatched: 'Receipts unmatched',
+    old: 'Old / not shipped',
+    unmatched: 'Unmatched receipts',
   };
 
-  function followUpVendorKey(categoryKey, vendor) {
-    return `${categoryKey}::${vendor}`;
+  const FOLLOW_UP_PREVIEW_LIMIT = 4;
+  const FOLLOW_UP_LESS_URGENT_PREVIEW_LIMIT = 3;
+
+  function followUpPreviewLimit(categoryKey) {
+    return categoryKey === 'nothing' ? FOLLOW_UP_LESS_URGENT_PREVIEW_LIMIT : FOLLOW_UP_PREVIEW_LIMIT;
+  }
+
+  function followUpRowVendor(row, categoryKey) {
+    if (categoryKey === 'unmatched') return row.vendorId || '(blank)';
+    return (row.po && row.po.vendorId) || '(blank)';
+  }
+
+  function followUpDaysLate(value) {
+    const late = daysLate(value);
+    return late != null && late > 0 ? late : 0;
+  }
+
+  function sortFollowUpRows(rows, categoryKey) {
+    if (categoryKey === 'unmatched') {
+      return rows.slice().sort((a, b) => {
+        const lateDiff = followUpDaysLate(b.etaDate) - followUpDaysLate(a.etaDate);
+        if (lateDiff) return lateDiff;
+        const aEta = a.etaDate || '';
+        const bEta = b.etaDate || '';
+        if (aEta && !bEta) return -1;
+        if (!aEta && bEta) return 1;
+        if (aEta && bEta && aEta !== bEta) return aEta.localeCompare(bEta);
+        return String(a.invoiceNo || '').localeCompare(String(b.invoiceNo || ''));
+      });
+    }
+
+    return rows.slice().sort((a, b) => {
+      const sa = a.summary;
+      const sb = b.summary;
+
+      if (categoryKey === 'overdue') {
+        const lateDiff = followUpDaysLate(sb.nextEta) - followUpDaysLate(sa.nextEta);
+        if (lateDiff) return lateDiff;
+        const balanceDiff = (sb.balance || 0) - (sa.balance || 0);
+        if (balanceDiff) return balanceDiff;
+      } else if (categoryKey === 'unplanned' || categoryKey === 'old') {
+        const ageDiff = (sb.ageDays || 0) - (sa.ageDays || 0);
+        if (ageDiff) return ageDiff;
+        const balanceDiff = (sb.balance || 0) - (sa.balance || 0);
+        if (balanceDiff) return balanceDiff;
+      } else if (categoryKey === 'notYetPlanned' || categoryKey === 'nothing') {
+        const balanceDiff = (sb.balance || 0) - (sa.balance || 0);
+        if (balanceDiff) return balanceDiff;
+      }
+
+      const aEta = sa.nextEta || '';
+      const bEta = sb.nextEta || '';
+      if (aEta && !bEta) return 1;
+      if (!aEta && bEta) return -1;
+      if (aEta && bEta && aEta !== bEta) return aEta.localeCompare(bEta);
+      return String(a.po.po || '').localeCompare(String(b.po.po || ''));
+    });
   }
 
   function followUpReferences(categoryKey, vendor) {
@@ -3807,7 +3854,15 @@
       'Ariel Purchasing',
     ].join('\n');
 
-    state.followUpReminderDraft = { vendor, count, categoryKey, categoryLabel, subject, body };
+    state.followUpReminderDraft = {
+      vendor,
+      count,
+      categoryKey,
+      categoryLabel,
+      subject,
+      body,
+      contact: vendorContact(vendor),
+    };
 
     const scrollY = window.scrollY;
     render();
@@ -3827,6 +3882,7 @@
 
     state.reminders.unshift({
       vendor: draft.vendor,
+      email: draft.contact && draft.contact.emails.length ? draft.contact.emails[0] : '',
       count: draft.count,
       channel: 'Email (simulated)',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -3842,6 +3898,8 @@
   function renderFollowUpReminderDialog() {
     const draft = state.followUpReminderDraft;
     if (!draft) return '';
+    const contact = draft.contact || vendorContact(draft.vendor);
+    const toLabel = [draft.vendor, contact.name].filter(Boolean).join(' · ');
 
     return `
       <div class="modal-backdrop">
@@ -3851,7 +3909,14 @@
             <div class="sub">${esc(draft.vendor)} · ${formatNumber(draft.count)} item${draft.count === 1 ? '' : 's'}</div>
           </div>
           <div class="mail-draft-meta">
-            <div><div class="sub">To</div><div><b>${esc(draft.vendor)}</b> purchasing contact</div></div>
+            <div>
+              <div class="sub">To</div>
+              ${contact.emails.length
+                ? `<div class="followup-mail-to">${contact.emails.map(contactEmailLink).join('<br>')}</div>`
+                : '<div class="sub">No email on file</div>'}
+              <div class="sub">${esc(toLabel)}</div>
+            </div>
+            <div><div class="sub">Phone</div><div>${contact.phone ? contactPhoneLink(contact.phone) : '<span class="sub">—</span>'}</div></div>
             <div><div class="sub">Category</div><div>${esc(draft.categoryLabel)}</div></div>
           </div>
           <label class="field-label" for="followup-draft-subject">Subject</label>
@@ -3873,11 +3938,7 @@
         <div class="row">
           <div>
             <h2>Follow-up categories</h2>
-            <div class="sub">Jump to a category, or expand and collapse the sections below.</div>
-          </div>
-          <div class="row">
-            <button class="s" data-action="followup-expand-all">Expand all</button>
-            <button class="s" data-action="followup-collapse-all">Collapse all</button>
+            <div class="sub">Jump to a category. Each section previews its most urgent records.</div>
           </div>
         </div>
         <div class="followup-index">
@@ -3890,45 +3951,124 @@
       </div>`;
   }
 
-  function renderFollowUpPoTable(rows) {
+  function followUpItemLines(po) {
+    const openLines = po.lines
+      .map((line) => ({
+        line,
+        open: openUnitsForLine(line),
+        unplanned: unplannedUnitsForLine(line),
+      }))
+      .filter((entry) => entry.open > 0);
+    const source = openLines.length
+      ? openLines
+      : po.lines.map((line) => ({ line, open: 0, unplanned: 0 }));
+    source.sort((a, b) => b.unplanned - a.unplanned
+      || b.open - a.open
+      || String(a.line.itemId || '').localeCompare(String(b.line.itemId || '')));
+    return {
+      primary: source[0] ? source[0].line : null,
+      total: source.length,
+      openCount: openLines.length,
+    };
+  }
+
+  function renderFollowUpItemCell(po) {
+    const items = followUpItemLines(po);
+    const line = items.primary;
+    if (!line) return '<span class="sub">—</span>';
+
+    const extra = items.openCount > 1
+      ? `<span class="sub">+${formatNumber(items.openCount - 1)} more open line${items.openCount - 1 === 1 ? '' : 's'}</span>`
+      : '';
     return `
-      <div class="sc">
-        <table>
+      <div class="followup-item-cell">
+        <b class="mono">${esc(line.itemId || '—')}</b>
+        ${line.description ? `<span class="sub followup-item-description" title="${attr(line.description)}">${esc(line.description)}</span>` : ''}
+        ${extra}
+      </div>`;
+  }
+
+  function renderFollowUpVendorCell(vendor) {
+    const code = vendorCode(vendor);
+    const name = vendorName(vendor);
+    const contact = vendorContact(vendor);
+    const detail = Array.from(new Set([
+      code && code !== vendor ? `Code ${code}` : '',
+      name,
+      contact.name,
+    ].filter(Boolean))).join(' · ');
+    const contactLinks = [];
+    if (contact.emails.length) contactLinks.push(contactEmailLink(contact.emails[0]));
+    if (contact.phone) contactLinks.push(contactPhoneLink(contact.phone));
+    return `
+      <div class="followup-vendor-cell">
+        <b>${esc(vendor)}</b>
+        ${detail ? `<span class="sub">${esc(detail)}</span>` : ''}
+        ${contactLinks.length
+          ? `<span class="followup-contact-links">${contactLinks.join('<span class="followup-contact-sep">·</span>')}</span>`
+          : '<span class="sub">No contact details</span>'}
+      </div>`;
+  }
+
+  function renderFollowUpActionCell(vendor, category) {
+    const count = category.vendorCounts.get(vendor) || 0;
+    const contact = vendorContact(vendor);
+    const disabled = vendor === '(blank)' || count <= 0;
+    const title = contact.emails.length
+      ? `Draft email to ${contact.emails[0]}`
+      : 'No email on file; the reminder draft will open without a recipient';
+    return `<button type="button" class="s p followup-reminder-button" data-action="remind:${attr(category.key)}:${attr(vendor)}:${count}" title="${attr(title)}"${disabled ? ' disabled' : ''}>Send reminder</button>`;
+  }
+
+  function renderFollowUpPoTable(rows, category) {
+    return `
+      <div class="sc followup-table-scroll">
+        <table class="compact-table followup-po-table">
           <thead>
             <tr>
               <th>PO</th>
-              <th>BUYER</th>
-              <th class="n">OPEN LINES</th>
-              <th class="n">OPEN VALUE</th>
-              <th class="n">BALANCE</th>
-              <th class="n">PLANNED</th>
-              <th class="n">UNPLANNED ITEMS</th>
+              <th>VENDOR</th>
+              <th>ITEM</th>
+              <th class="n">OPEN BALANCE</th>
               <th>ETA</th>
-              <th class="n">DAYS LATE</th>
-              <th class="n">PO AGE</th>
-              <th>STATUS</th>
+              <th>ACTION</th>
             </tr>
           </thead>
           <tbody>
             ${rows.map(({ po, summary }) => {
-              const late = summary.nextEta ? daysLate(summary.nextEta) : null;
               const hasOpenReceipt = poHasOpenReceipt(po);
               const shipped = shippedUnitsForPo(po);
               const planned = Math.max(0, Math.min(plannedUnitsForPo(po), summary.balance - shipped));
               const unplanned = unplannedUnitsForPo(po);
+              const context = hasOpenReceipt
+                ? 'In transit'
+                : category.key === 'nothing' && planned > 0
+                  ? `${formatNumber(planned)} planned`
+                  : unplanned > 0
+                    ? `${formatNumber(unplanned)} unplanned`
+                    : 'No open balance';
               return `
-                <tr>
-                  <td><b>${esc(po.po)}</b>${summary.old ? ` ${renderTag('wn', 'Old')}` : ''}${shipped > 0 ? ` ${renderTag('info', 'In container', 'Some or all open items are on a container marked Shipped.')}` : ''}${followUpPlanningTags(po).join(' ')}</td>
-                  <td title="${attr(purchaserTitle(po.purchaser))}">${esc(po.buyer || '—')}</td>
-                  <td class="n">${formatNumber(summary.openLines)}</td>
-                  <td class="n">${formatValue(summary.openValue)}</td>
-                  <td class="n">${formatNumber(summary.balance)}</td>
-                  <td class="n">${planned ? formatNumber(planned) : '—'}</td>
-                  <td class="n">${hasOpenReceipt ? '<span class="sub" title="Covered by an open receipt">In transit</span>' : unplanned > 0 ? `<span class="late">${formatNumber(unplanned)}</span>` : '0'}</td>
-                  <td>${summary.nextEta ? `${formatDate(summary.nextEta)}<br><span class="sub">${esc(relativeEta(summary.nextEta))}</span>` : '—'}</td>
-                  <td class="n">${late != null && late > 0 ? renderTag('bad', late) : '—'}</td>
-                  <td class="n">${summary.ageDays == null ? '—' : formatNumber(summary.ageDays)}</td>
-                  <td>${renderStatusTag(summary.status)}</td>
+                <tr data-followup-row="${attr(po.po)}">
+                  <td>
+                    <b class="mono followup-po-number">${esc(po.po)}</b>
+                    ${summary.ageDays == null ? '' : `<span class="sub">${formatNumber(summary.ageDays)} days old</span>`}
+                  </td>
+                  <td>${renderFollowUpVendorCell(po.vendorId || '(blank)')}</td>
+                  <td>${renderFollowUpItemCell(po)}</td>
+                  <td class="n">
+                    <div class="followup-balance">
+                      <b>${formatNumber(summary.balance)}</b> <span class="followup-unit">items</span>
+                      <span class="sub">${esc(context)}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div class="followup-eta">
+                      ${summary.nextEta
+                        ? `<b class="${summary.nextEta < AS_OF ? 'late' : ''}">${formatDate(summary.nextEta)}</b><span class="sub">${esc(relativeEta(summary.nextEta))}</span>`
+                        : '<span class="sub">—</span>'}
+                    </div>
+                  </td>
+                  <td>${renderFollowUpActionCell(po.vendorId || '(blank)', category)}</td>
                 </tr>`;
             }).join('')}
           </tbody>
@@ -3936,25 +4076,82 @@
       </div>`;
   }
 
-  function renderFollowUpCategory({ key, title, description, groups, renderGroup, tone }) {
-    const total = groups.reduce((sum, group) => sum + group.rows.length, 0);
-    const open = state.followUpOpenCategories.has(key);
+  function renderFollowUpReceiptTable(rows, category) {
     return `
-      <details class="card followup-category tone-${tone}" id="followup-${attr(key)}" data-followup-category="${attr(key)}"${open ? ' open' : ''}>
-        <summary class="followup-category-summary">
-          <div>
+      <div class="sc followup-table-scroll">
+        <table class="compact-table followup-receipt-table">
+          <thead>
+            <tr>
+              <th>INVOICE</th>
+              <th>VENDOR</th>
+              <th>ETA</th>
+              <th>RECEIPT DATE</th>
+              <th>TRACKING</th>
+              <th>TYPE</th>
+              <th>ACTION</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((receipt) => `
+              <tr data-followup-row="${attr(receipt.invoiceNo || receipt.id)}">
+                <td><b class="mono">${esc(receipt.invoiceNo || '—')}</b></td>
+                <td>${renderFollowUpVendorCell(receipt.vendorId || '(blank)')}</td>
+                <td>
+                  <div class="followup-eta">
+                    ${receipt.etaDate
+                      ? `<b class="${receipt.etaDate < AS_OF ? 'late' : ''}">${formatDate(receipt.etaDate)}</b><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>`
+                      : '<span class="sub">—</span>'}
+                  </div>
+                </td>
+                <td>${renderReceiptReceivedDate(receipt)}</td>
+                <td class="mono">${esc(receipt.tracking || '—')}</td>
+                <td>${esc(receipt.type || '—')}</td>
+                <td>${renderFollowUpActionCell(receipt.vendorId || '(blank)', category)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  function renderFollowUpCategory(category) {
+    const { key, title, tone, rows, total } = category;
+    const limit = followUpPreviewLimit(key);
+    const expanded = state.followUpExpandedCategory === key;
+    const visibleRows = expanded ? rows : rows.slice(0, limit);
+    const recordNoun = key === 'unmatched' ? 'receipt' : 'PO';
+    const countLabel = `${formatNumber(total)} ${recordNoun}${total === 1 ? '' : 's'}`;
+    const vendorLabel = `${formatNumber(category.vendorCount)} vendor${category.vendorCount === 1 ? '' : 's'}`;
+    const previewLabel = total > limit
+      ? expanded
+        ? `Showing all ${formatNumber(total)}`
+        : `Showing ${formatNumber(visibleRows.length)} of ${formatNumber(total)}`
+      : '';
+    const toggle = total > limit
+      ? `<button class="s followup-view-all" data-action="followup-toggle-category:${attr(key)}">${expanded ? 'Show preview' : `View all ${formatNumber(total)}`}</button>`
+      : '';
+    const content = key === 'unmatched'
+      ? renderFollowUpReceiptTable(visibleRows, category)
+      : renderFollowUpPoTable(visibleRows, category);
+
+    return `
+      <section class="card followup-category tone-${tone}" id="followup-${attr(key)}" data-followup-category="${attr(key)}">
+        <div class="followup-category-head">
+          <div class="followup-category-title">
             <h2>${esc(title)}</h2>
-            <div class="sub">${description}</div>
+            <span class="tag ${tone === 'neutral' ? '' : tone}">${countLabel}</span>
+            <span class="followup-category-meta">${vendorLabel}</span>
           </div>
-          <div class="followup-category-count">
-            <span class="tag ${tone === 'neutral' ? '' : tone}">${formatNumber(total)} item${total === 1 ? '' : 's'}</span>
-            <span class="sub">${formatNumber(groups.length)} vendor${groups.length === 1 ? '' : 's'}</span>
-          </div>
-        </summary>
-        <div class="followup-category-body">
-          ${groups.length ? groups.map((group) => renderGroup(group, key)).join('') : '<div class="sub" style="margin-top:10px">Nothing in this category.</div>'}
+          ${previewLabel || toggle ? `
+            <div class="followup-category-actions">
+              ${previewLabel ? `<span class="followup-preview-count">${previewLabel}</span>` : ''}
+              ${toggle}
+            </div>` : ''}
         </div>
-      </details>`;
+        <div class="followup-category-body">
+          ${content}
+        </div>
+      </section>`;
   }
 
   function renderReminderLog() {
@@ -3969,7 +4166,7 @@
           <button class="s" data-action="clear-reminders">Clear log</button>
         </div>
         <div class="sc" style="margin-top:10px">
-          <table style="min-width:480px">
+          <table style="min-width:560px">
             <thead>
               <tr>
                 <th>VENDOR</th>
@@ -3981,7 +4178,10 @@
             <tbody>
               ${state.reminders.map((reminder) => `
                 <tr>
-                  <td><b>${esc(reminder.vendor)}</b></td>
+                  <td>
+                    <b>${esc(reminder.vendor)}</b>
+                    ${reminder.email ? `<div>${contactEmailLink(reminder.email)}</div>` : ''}
+                  </td>
                   <td class="n">${formatNumber(reminder.count)}</td>
                   <td>${esc(reminder.channel)}</td>
                   <td>${esc(reminder.time)}</td>
@@ -3994,136 +4194,38 @@
 
   function renderFollowUps() {
     const buckets = followUpBuckets();
-    const unplannedGroups = groupByVendor(buckets.unplanned);
-    const notYetPlannedGroups = groupByVendor(buckets.notYetPlanned);
-    const nothingGroups = groupByVendor(buckets.nothing);
-    const overdueGroups = groupByVendor(buckets.overdue);
-    const oldGroups = groupByVendor(buckets.old);
-
-    const unmatchedGroups = new Map();
-    buckets.unmatched.forEach((receipt) => {
-      const key = receipt.vendorId || '(blank)';
-      if (!unmatchedGroups.has(key)) unmatchedGroups.set(key, { vendor: key, rows: [] });
-      unmatchedGroups.get(key).rows.push(receipt);
-    });
-    const unmatched = Array.from(unmatchedGroups.values()).sort((a, b) => a.vendor.localeCompare(b.vendor));
-
-    const renderVendorGroup = (categoryKey, group, countLabel, content) => {
-      const vendorKey = followUpVendorKey(categoryKey, group.vendor);
-      const open = state.followUpOpenVendors.has(vendorKey);
-      return `
-        <details class="vendor-block followup-vendor" data-followup-vendor="${attr(vendorKey)}"${open ? ' open' : ''}>
-          <summary class="followup-vendor-summary">
-            <h3><span class="vendor-pill">${esc(group.vendor)}</span> <span class="sub">${countLabel}</span></h3>
-          </summary>
-          <div class="followup-vendor-body">
-            <div class="row followup-vendor-actions">
-              <span class="sub">Draft a follow-up email using these items.</span>
-              <button class="s p" data-action="remind:${attr(categoryKey)}:${attr(group.vendor)}:${group.rows.length}">Send reminder</button>
-            </div>
-            ${content}
-          </div>
-        </details>`;
-    };
-
-    const renderPoGroup = (group, categoryKey) => renderVendorGroup(
-      categoryKey,
-      group,
-      `${formatNumber(group.rows.length)} PO${group.rows.length === 1 ? '' : 's'}`,
-      renderFollowUpPoTable(group.rows)
-    );
-
-    const renderUnmatchedGroup = (group, categoryKey) => renderVendorGroup(
-      categoryKey,
-      group,
-      `${formatNumber(group.rows.length)} unmatched receipt${group.rows.length === 1 ? '' : 's'}`,
-      `<div class="sc">
-        <table>
-          <thead>
-            <tr>
-              <th>INVOICE</th>
-              <th>ETA</th>
-              <th>RECEIPT DATE</th>
-              <th>TRACKING</th>
-              <th>TYPE</th>
-              <th>STATUS</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${group.rows.map((receipt) => `
-              <tr>
-                <td class="mono">${esc(receipt.invoiceNo)}</td>
-                <td>${receipt.etaDate ? `${formatDate(receipt.etaDate)}<br><span class="sub">${esc(relativeEta(receipt.etaDate))}</span>` : '—'}</td>
-                <td>${renderReceiptReceivedDate(receipt)}</td>
-                <td class="mono">${esc(receipt.tracking || '—')}</td>
-                <td>${esc(receipt.type || '—')}</td>
-                <td>${renderReceiptStatusTag(receipt)}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>`
-    );
-
-    const categories = [
-      {
-        key: 'unplanned',
-        shortTitle: 'At risk',
-        title: '1. At risk',
-        description: 'Open balance with no open receipt and unplanned items; the PO is over 90 days old or has a received receipt.',
-        groups: unplannedGroups,
-        renderGroup: renderPoGroup,
-        tone: 'bad',
-      },
-      {
-        key: 'notYetPlanned',
-        shortTitle: 'Not yet planned',
-        title: '2. Not yet planned',
-        description: 'Unplanned open balance on a PO that does not meet the At risk definition.',
-        groups: notYetPlannedGroups,
-        renderGroup: renderPoGroup,
-        tone: 'wn',
-      },
-      {
-        key: 'nothing',
-        shortTitle: 'Already planned',
-        title: '3. Open balance — already planned',
-        description: 'Open balance not yet shipped is assigned to a draft or booked container.',
-        groups: nothingGroups,
-        renderGroup: renderPoGroup,
-        tone: 'info',
-      },
-      {
-        key: 'overdue',
-        shortTitle: 'Past ETA',
-        title: '4. Past ETA',
-        description: 'At least one open receipt has an ETA before the data date.',
-        groups: overdueGroups,
-        renderGroup: renderPoGroup,
-        tone: 'bad',
-      },
-      {
-        key: 'old',
-        shortTitle: 'Old / not shipped',
-        title: '5. Not shipped yet and Old',
-        description: 'No receipt at all and the PO is more than 90 days old.',
-        groups: oldGroups,
-        renderGroup: renderPoGroup,
-        tone: 'wn',
-      },
-      {
-        key: 'unmatched',
-        shortTitle: 'Unmatched receipts',
-        title: '6. Receipts unmatched',
-        description: 'Receipts with no exact or suffix-normalised PO match. They are not forced onto a PO and are shown across all segments because they have no PO/FOB segment.',
-        groups: unmatched,
-        renderGroup: renderUnmatchedGroup,
-        tone: 'neutral',
-      },
+    const definitions = [
+      { key: 'unplanned', shortTitle: 'At risk', rows: buckets.unplanned, tone: 'bad' },
+      { key: 'notYetPlanned', shortTitle: 'Not yet planned', rows: buckets.notYetPlanned, tone: 'wn' },
+      { key: 'overdue', shortTitle: 'Past ETA', rows: buckets.overdue, tone: 'bad' },
+      { key: 'old', shortTitle: 'Old / not shipped', rows: buckets.old, tone: 'wn' },
+      { key: 'unmatched', shortTitle: 'Unmatched receipts', rows: buckets.unmatched, tone: 'neutral' },
+      { key: 'nothing', shortTitle: 'Already planned', rows: buckets.nothing, tone: 'info' },
     ];
-    categories.forEach((category) => {
-      category.total = category.groups.reduce((sum, group) => sum + group.rows.length, 0);
+
+    const categories = definitions.map((definition) => {
+      const rows = sortFollowUpRows(definition.rows, definition.key);
+      const vendorCounts = new Map();
+      rows.forEach((row) => {
+        const vendor = followUpRowVendor(row, definition.key);
+        vendorCounts.set(vendor, (vendorCounts.get(vendor) || 0) + 1);
+      });
+      return {
+        ...definition,
+        title: FOLLOW_UP_CATEGORY_LABELS[definition.key],
+        rows,
+        total: rows.length,
+        vendorCount: vendorCounts.size,
+        vendorCounts,
+      };
     });
+
+    const populated = categories.filter((category) => category.total > 0);
+    const emptyState = `
+      <div class="card followup-empty">
+        <h2>No follow-ups match the current filters</h2>
+        <div class="sub">Try changing the vendor or buyer filter in the toolbar.</div>
+      </div>`;
 
     return `
       ${renderHeader(
@@ -4132,9 +4234,9 @@
         `<div class="sub">${SEGMENT_LABELS[state.segmentFilter] || 'All segments'}</div>`
       )}
 
-      ${renderReminderLog()}
       ${renderFollowUpIndex(categories)}
-      ${categories.map((category) => renderFollowUpCategory(category)).join('')}
+      ${populated.length ? populated.map((category) => renderFollowUpCategory(category)).join('') : emptyState}
+      ${renderReminderLog()}
       ${renderFollowUpReminderDialog()}`;
   }
 
@@ -4619,34 +4721,19 @@
         sendFollowUpReminder();
         break;
 
-      case 'followup-expand-all':
-        state.followUpOpenCategories = new Set(Object.keys(FOLLOW_UP_CATEGORY_LABELS));
+      case 'followup-toggle-category': {
+        const categoryKey = args[0] || '';
+        state.followUpExpandedCategory = state.followUpExpandedCategory === categoryKey ? '' : categoryKey;
+        const scrollY = window.scrollY;
         render();
-        setTimeout(() => {
-          document.querySelectorAll('.followup-category, .followup-vendor').forEach((element) => {
-            element.open = true;
-          });
-        }, 0);
+        window.scrollTo({ top: scrollY });
         break;
-
-      case 'followup-collapse-all':
-        state.followUpOpenCategories = new Set();
-        render();
-        setTimeout(() => {
-          document.querySelectorAll('.followup-category, .followup-vendor').forEach((element) => {
-            element.open = false;
-          });
-        }, 0);
-        break;
+      }
 
       case 'jump-followup': {
         const categoryKey = args[0] || 'unplanned';
-        state.followUpOpenCategories.add(categoryKey);
-        render();
-        setTimeout(() => {
-          const section = document.getElementById(`followup-${categoryKey}`);
-          if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        }, 0);
+        const section = document.getElementById(`followup-${categoryKey}`);
+        if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
         break;
       }
 
@@ -4693,23 +4780,6 @@
     const [action, ...args] = actionElement.dataset.action.split(':');
     handleAction(action, args);
   });
-
-  document.addEventListener('toggle', (event) => {
-    const category = event.target.closest?.('details[data-followup-category]');
-    if (category) {
-      const key = category.dataset.followupCategory;
-      if (category.open) state.followUpOpenCategories.add(key);
-      else state.followUpOpenCategories.delete(key);
-      return;
-    }
-
-    const vendor = event.target.closest?.('details[data-followup-vendor]');
-    if (vendor) {
-      const key = vendor.dataset.followupVendor;
-      if (vendor.open) state.followUpOpenVendors.add(key);
-      else state.followUpOpenVendors.delete(key);
-    }
-  }, true);
 
   document.addEventListener('submit', (event) => {
     if (event.target.id === 'container-vendor-form') {

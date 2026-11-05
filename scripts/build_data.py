@@ -26,8 +26,10 @@ PO_CSV = ROOT / "PurchPO_202611021053.csv"
 DETAIL_CSV = ROOT / "PurchPODetail_202611021056.csv"
 RECEIPT_CSV = ROOT / "PurchReceipt_202611021104.csv"
 VENDOR_CSV = ROOT / "Vendors_202611041459.csv"
+VENDOR_CONTACTS_CSV = ROOT / "VendorContacts_202611041500.csv"
 INVENTORY_CSV = ROOT / "InventoryTransactions_202611041440.csv"
 OUT_JS = ROOT / "js" / "data.js"
+EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 # Only fields the prototype needs. POMemo is deliberately excluded because it
 # contains large multi-line free text and is not displayed.
@@ -90,6 +92,18 @@ RECEIPT_COLUMNS = [
 
 def text(value: str | None) -> str:
     return (value or "").strip()
+
+
+def emails_from(value: str | None) -> list[str]:
+    emails: list[str] = []
+    seen: set[str] = set()
+    for match in EMAIL_PATTERN.findall(text(value)):
+        key = match.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        emails.append(match)
+    return emails
 
 
 def number(value: str | None) -> float | None:
@@ -276,6 +290,33 @@ def main() -> None:
 
     vendor_names: dict[str, str] = {}
     vendor_codes: dict[str, str] = {}
+    vendor_contacts: dict[str, dict] = {}
+    contacts_by_vendor: dict[str, list[dict]] = defaultdict(list)
+
+    if VENDOR_CONTACTS_CSV.exists():
+        for raw in read_csv(VENDOR_CONTACTS_CSV):
+            vendor_id = text(raw.get("VendorID"))
+            if not vendor_id:
+                continue
+            contact_name = " ".join(
+                part for part in (
+                    text(raw.get("ContactFName")),
+                    text(raw.get("ContactLName")),
+                ) if part
+            )
+            emails = emails_from(raw.get("ContactEmail"))
+            phone = text(raw.get("ContactTel")) or text(raw.get("ContactMobile"))
+            if not (contact_name or emails or phone):
+                continue
+            contacts_by_vendor[vendor_id].append(
+                {
+                    "name": contact_name,
+                    "emails": emails,
+                    "phone": phone,
+                    "main": text(raw.get("MainContact")).lower() in {"1", "true", "yes", "y"},
+                }
+            )
+
     if VENDOR_CSV.exists():
         for raw in read_csv(VENDOR_CSV):
             vendor_id = text(raw.get("VendorID"))
@@ -285,6 +326,42 @@ def main() -> None:
                 vendor_names[vendor_id] = vendor_name
             if vendor_id and vendor_code and vendor_code.upper() != vendor_id.upper():
                 vendor_codes[vendor_id] = vendor_code
+
+            if not vendor_id:
+                continue
+            vendor_email_list = emails_from(raw.get("VendorEmail"))
+            vendor_phone = text(raw.get("VendorTel")) or text(raw.get("Mobile"))
+            contacts = contacts_by_vendor.get(vendor_id, [])
+            main_contact = next(
+                (contact for contact in contacts if contact["main"] and (contact["emails"] or contact["phone"])),
+                None,
+            )
+            selected_contact = main_contact or next(
+                (contact for contact in contacts if contact["emails"] or contact["phone"]),
+                None,
+            )
+            emails: list[str] = []
+            if selected_contact and selected_contact["emails"]:
+                emails = list(selected_contact["emails"])
+            else:
+                emails = list(vendor_email_list)
+            if not emails:
+                seen_emails: set[str] = set()
+                for contact in contacts:
+                    for email in contact["emails"]:
+                        if email.lower() not in seen_emails:
+                            seen_emails.add(email.lower())
+                            emails.append(email)
+            phone = (selected_contact["phone"] if selected_contact else "") or vendor_phone
+            contact_name = text(raw.get("PurchaseContact")) or (
+                selected_contact["name"] if selected_contact else ""
+            )
+            if contact_name or emails or phone:
+                vendor_contacts[vendor_id] = {
+                    "name": contact_name,
+                    "emails": emails,
+                    "phone": phone,
+                }
 
     po_rows: list[dict] = []
     header_pos: set[str] = set()
@@ -671,10 +748,12 @@ def main() -> None:
             "detail": DETAIL_CSV.name,
             "receipt": RECEIPT_CSV.name,
             "vendors": VENDOR_CSV.name if VENDOR_CSV.exists() else "",
+            "vendorContacts": VENDOR_CONTACTS_CSV.name if VENDOR_CONTACTS_CSV.exists() else "",
             "inventory": INVENTORY_CSV.name if INVENTORY_CSV.exists() else "",
         },
         "vendorNames": vendor_names,
         "vendorCodes": vendor_codes,
+        "vendorContacts": vendor_contacts,
         "ports": sorted({row["port"] for row in po_rows if row["port"]}),
         "portMap": {
             port: normalise_port(port)
