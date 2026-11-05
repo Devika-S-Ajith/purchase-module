@@ -220,10 +220,6 @@ aside a.on .bd {
   letter-spacing: 0.04em;
 }
 
-#meta {
-  margin-left: auto;
-}
-
 select,
 input[type="search"],
 input[type="text"],
@@ -253,7 +249,12 @@ textarea:focus-visible {
 }
 
 .planner-container-input {
-  min-width: 210px;
+  flex: 1 1 420px;
+  min-width: 280px;
+  max-width: 720px;
+  width: auto;
+  height: 42px;
+  font-size: 14px;
 }
 
 main {
@@ -810,19 +811,34 @@ button.s:not(.p):hover {
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    position: sticky;
-    top: calc(var(--app-toolbar-height, 64px) + 12px);
   }
 
   body.plan-workspace .planner-cols > .ctns {
     min-height: 0;
+    overflow: hidden;
+    padding-right: 0;
+  }
+
+  body.plan-workspace .planner-container-tabs {
+    flex: 0 0 auto;
+  }
+
+  body.plan-workspace .planner-container-card {
+    flex: 1 1 auto;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  body.plan-workspace .planner-container-side {
+    min-height: 0;
     overflow-y: auto;
-    overscroll-behavior: contain;
-    padding-right: 2px;
   }
 
   body.plan-workspace .planner-container-card > .zone.container-drop {
+    min-height: 0;
     max-height: none;
+    overflow-y: auto;
   }
 }
 
@@ -965,7 +981,7 @@ button.s:not(.p):hover {
   gap: 2px;
   flex: 0 0 auto;
   min-width: 175px;
-  max-width: 260px;
+  max-width: 340px;
   padding: 9px 12px;
   border: 1px solid var(--line);
   border-radius: 9px;
@@ -2513,6 +2529,13 @@ details.more summary {
     grid-template-columns: 1fr;
   }
 
+  .planner-container-input {
+    flex-basis: 100%;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+
   .planner-po-panel > .zone.planner-po-list {
     max-height: 60vh;
   }
@@ -2538,9 +2561,6 @@ details.more summary {
     padding: 10px 14px;
   }
 
-  #meta {
-    margin-left: 0;
-  }
 }
 
 @media (max-width: 1000px) {

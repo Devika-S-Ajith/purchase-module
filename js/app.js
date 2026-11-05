@@ -22,7 +22,6 @@
 
   const HEALTH = DATA.health;
   const AS_OF = DATA.asOf;
-  const AS_OF_LABEL = '2 Nov 2026';
   const TRACKING_UNAVAILABLE = 'Tracking number unavailable';
 
   const SEGMENT_LABELS = {
@@ -1216,7 +1215,7 @@
     return `
       ${renderHeader(
         'Vendors',
-        `Search by vendor name or code/ID. The list follows the current Vendor and Buyer filters. Received % is the share of POs fully received. Data as of ${AS_OF_LABEL}.`,
+        '',
         `<div class="sub">${formatNumber(allVendors.length)} vendors · $${formatValue(openValue)} open value</div>`
       )}
 
@@ -1275,7 +1274,7 @@
     return `
       ${renderHeader(
         'Purchase orders',
-        `Real PO numbers from PurchPO. ETA is the earliest open receipt ETA and is PO-level only. Data as of ${AS_OF_LABEL}.`,
+        '',
         `<div class="sub">${formatNumber(HEALTH.counts.posWithLines)} POs with lines in export · ${SEGMENT_LABELS[state.segmentFilter] || 'All segments'}</div>`
       )}
 
@@ -3066,27 +3065,17 @@
       || null;
     state.plannerActiveContainerId = activeContainer ? activeContainer.id : '';
     const missingCbmAssignments = containers.reduce((sum, container) => sum + plannerMissingCbm(container), 0);
-    const typeOptions = Object.entries(CONTAINER_TYPES)
-      .map(([key, value]) => `<option value="${key}">${value.label} · ${value.capacity} CBM</option>`)
-      .join('');
-    const plannedUnits = containers.reduce((sum, container) => sum + containerUnits(container), 0);
-    const remainingUnits = allItems.reduce((sum, item) => sum + item.remaining, 0);
-
     return `
       <div class="card row planner-actions-card" style="justify-content:flex-start">
         <input
           id="planner-container-type"
           class="planner-container-input"
           type="text"
-          list="planner-container-types"
           placeholder="Container name or type (e.g. 40HC)"
           autocomplete="off"
         >
-        <datalist id="planner-container-types">${typeOptions}</datalist>
         <button class="p" data-action="add-container">Add container</button>
         ${containers.length ? `<button class="s" data-action="clear-plan" title="Removes draft and booked containers only. Shipped and arrived containers stay.">Clear draft/booked</button>` : ''}
-        <span class="sub">${formatNumber(allItems.length)} open line${allItems.length === 1 ? '' : 's'}</span>
-        <span class="sub">${formatNumber(plannedUnits)} items planned · ${formatNumber(remainingUnits)} items unplanned</span>
         ${missingCbmAssignments ? renderTag('bad', `${missingCbmAssignments} assigned line${missingCbmAssignments === 1 ? '' : 's'} with CBM missing`, 'The fill bar excludes CBM-missing assignments.') : ''}
       </div>
 
@@ -3122,6 +3111,7 @@
                     data-action="select-plan-container:${attr(container.id)}"
                     role="tab"
                     aria-selected="${active ? 'true' : 'false'}"
+                    title="${attr(`${container.name} · ${container.type}`)}"
                   >
                     <b>${esc(container.name)}</b>
                     <span class="sub">${esc(container.type)} · ${esc(status.label)} · ${formatNumber(containerUnits(container))} items · ${fill.toFixed(0)}% full</span>
@@ -3132,6 +3122,16 @@
           ` : '<div class="card sub">No draft or booked containers. Add one to start planning.</div>'}
         </div>
       </div>`;
+  }
+
+  function revealActivePlannerContainerTab() {
+    const tab = document.querySelector('.planner-container-tab.on');
+    const tabs = tab && tab.closest('.planner-container-tabs');
+    if (!tab || !tabs) return;
+    const left = tab.offsetLeft;
+    const right = left + tab.offsetWidth;
+    if (left < tabs.scrollLeft) tabs.scrollLeft = left;
+    else if (right > tabs.scrollLeft + tabs.clientWidth) tabs.scrollLeft = right - tabs.clientWidth;
   }
 
   function realGroupMatchesStatus(group, status) {
@@ -3351,39 +3351,6 @@
     host.innerHTML = renderContainersList(state.containersView);
   }
 
-  function unmatchedLegacyVendorUpdates() {
-    const records = [
-      ...state.plannerContainers.map((container) => ({ kind: 'planner', key: container.id, container })),
-      ...realContainerGroups().filter((group) => !group.isBlank).map((group) => ({ kind: 'real', key: group.key, group })),
-    ];
-    return state.vendorUpdates.filter((update) =>
-      !records.some((record) => containerRecordMatchesLegacyUpdate(record, update)));
-  }
-
-  function renderLegacyVendorUpdates() {
-    const updates = unmatchedLegacyVendorUpdates();
-    if (!updates.length) return '';
-    return `
-      <details class="card">
-        <summary><b>Vendor updates not yet attached to a container</b> <span class="sub">${formatNumber(updates.length)} kept from the old page</span></summary>
-        <div class="sc" style="margin-top:10px">
-          <table class="compact-table">
-            <thead><tr><th>PO</th><th>TRACKING</th><th>STATUS</th><th>NOTES</th><th>LOGGED</th></tr></thead>
-            <tbody>
-              ${updates.map((update) => `
-                <tr>
-                  <td>${esc(update.po || '—')}</td>
-                  <td class="mono">${esc(update.tracking || '—')}</td>
-                  <td>${esc(update.status || '—')}</td>
-                  <td>${esc(update.notes || '—')}</td>
-                  <td>${update.loggedAt ? formatDate(update.loggedAt) : '—'}</td>
-                </tr>`).join('')}
-            </tbody>
-          </table>
-        </div>
-      </details>`;
-  }
-
   function renderContainers() {
     const detailId = currentContainerDetailId();
     const record = detailId ? findContainerRecord(detailId) : null;
@@ -3406,15 +3373,10 @@
     else body = renderContainersShipments(state.containersView);
 
     return `
-      ${renderHeader(
-        'Containers',
-        `The container is the source of truth: contents come from planning, and real shipment balances come from the PO export. Data as of ${AS_OF_LABEL}.`,
-        `<div class="row"><span class="sub">Browser-local demo data</span><button class="s" data-action="reset-demo">Reset demo data</button></div>`
-      )}
+      ${renderHeader('Containers')}
       ${renderContainerSegmentedControl()}
       <div class="containers-page${detailId ? ' has-detail' : ''}${planPage ? ' plan-page' : ''}">
         ${body}
-        ${renderLegacyVendorUpdates()}
       </div>
       ${detailMarkup}
       ${state.containersView === 'plan' ? renderPlannerAssignmentDialog() : ''}`;
@@ -3554,32 +3516,6 @@
     state.containerDocuments[key] = documents;
     persistDemoState();
     render();
-  }
-
-  function resetDemoData() {
-    try {
-      window.localStorage.removeItem(DEMO_STORAGE_KEY);
-    } catch (error) {
-      /* Reset still applies in memory. */
-    }
-    state.plannerContainers = [];
-    state.plannerContainerSequence = 0;
-    state.plannerActiveContainerId = '';
-    state.plannerAssigned = {};
-    state.plannerSelectedLineId = null;
-    state.plannerPendingAssignment = null;
-    state.simulatedReceipts = {};
-    state.simulatedLineQty = {};
-    state.poConfirmations = {};
-    state.vendorDetails = {};
-    state.containerDocuments = {};
-    state.containerActivity = {};
-    state.shippingLineEdit = '';
-    state.expandedContainerGroups = new Set();
-    state.containersPage = 1;
-    clearSummaryCache();
-    render();
-    showToast('Demo data reset. The old Vendor updates store was left untouched.');
   }
 
   function poConfirmation(poNumber) {
@@ -4402,10 +4338,6 @@
     renderNavigation(viewKey);
     syncGlobalFilters();
 
-    document.getElementById('meta').textContent =
-      `Data as of ${AS_OF_LABEL} · ${formatNumber(HEALTH.counts.poHeaders)} POs · ` +
-      `${formatNumber(HEALTH.counts.detailLines)} lines · ${formatNumber(HEALTH.counts.receipts)} receipts`;
-
     main.innerHTML = VIEWS[viewKey]();
 
     if (viewKey === 'orders') {
@@ -4415,7 +4347,10 @@
     }
 
     if (viewKey === 'containers') {
-      if (state.containersView === 'plan') bindPlannerDragAndDrop();
+      if (state.containersView === 'plan') {
+        bindPlannerDragAndDrop();
+        setTimeout(revealActivePlannerContainerTab, 0);
+      }
       if (detailId && !previousDetailId) {
         const scroll = window.scrollY;
         if (state.containersReturnScroll == null) state.containersReturnScroll = scroll;
@@ -4546,10 +4481,6 @@
 
       case 'close-container':
         closeContainerDetail();
-        break;
-
-      case 'reset-demo':
-        resetDemoData();
         break;
 
       case 'confirm-ship-as-planned':

@@ -42,7 +42,7 @@ Below it is Top 8 vendors by open value with a PO-based Received %; “View all 
 
 The page has three segmented views with counts:
 
-- **Plan** — exactly the previous planning behaviour, limited to Draft and Booked containers. Draft and booked containers appear in a horizontal switcher and only the active container is shown, so planning focuses on one container at a time. Includes every open Import balance without an open receipt, including remainders of partly received POs. Type a container name/type and add it (40HC 68 CBM, 40ST 58 CBM and 20GP 28 CBM are recognised capacity assumptions), drag or tap-to-assign open lines, snap down to whole cartons using `BoxQty` (a final sub-carton remainder can be planned as a partial block), and warn when CBM or carton data is missing. Search the awaiting lines by PO, vendor, item ID or description. The left PO workspace stays inside the application viewport: its heading, line count and full-width search box remain visible while only the PO list scrolls, so large line lists can be reviewed without page scrolling. Each line card labels the PO, vendor, Item ID, description, remaining quantity in items, cartons and CBM. A quantity dialog lets one PO line split across containers; assigned blocks are labelled B1, B2, … and show quantities in items. Fill turns red over 100%.
+- **Plan** — exactly the previous planning behaviour, limited to Draft and Booked containers. Draft and booked containers appear in a horizontal switcher and only the active container is shown, so planning focuses on one container at a time. Includes every open Import balance without an open receipt, including remainders of partly received POs. Type a container name/type in the large free-text field and add it (40HC 68 CBM, 40ST 58 CBM and 20GP 28 CBM are recognised capacity assumptions), drag or tap-to-assign open lines, snap down to whole cartons using `BoxQty` (a final sub-carton remainder can be planned as a partial block), and warn when CBM or carton data is missing. Search the awaiting lines by PO, vendor, item ID or description. The left PO workspace stays inside the application viewport: its heading, line count and full-width search box remain visible while only the PO list scrolls, so large line lists can be reviewed without page scrolling. The selected container header and actions also stay fixed; only the assigned-items drop area scrolls, and the active container tab is automatically brought into view. Each line card labels the PO, vendor, Item ID, description, remaining quantity in items, cartons and CBM. A quantity dialog lets one PO line split across containers; assigned blocks are labelled B1, B2, … and show quantities in items. Fill turns red over 100%.
 - **In transit** — Shipped containers created in Plan plus real receipt-export groups without a `ReceiptDate`. Real groups are collapsed by default, paginated 20 per page and show shared-container counts. Search covers container/tracking, invoice, PO and vendor; filters cover receipt type and the plain status labels (“On the way”, “Past ETA”, “No ETA”, “No matching PO”, “Invalid data”).
 - **Arrived** — Arrived containers created in Plan plus real receipt-export groups with a `ReceiptDate`. Uses the same grouping, search and type filters.
 
@@ -50,11 +50,9 @@ Container detail uses `#containers/<id>`: a drawer on wide screens and a full-pa
 
 Below the stepper, a latest-first activity timeline records container creation, POs added, booking, shipment and arrival actions, plus ETA edits. Activity history is stored in the merged demo state; existing containers do not get invented historical events. Real receipt-export arrivals are dated from `ReceiptDate`. Shipment details, contents/shipped-quantity editing and documents are kept in a collapsed section so the tracking view stays concise. A Booked container ships “as planned” by default; “Shipped differently” can reduce a line before arrival, and any shortfall returns to the PO balance. Marking it Arrived moves shipped units to Received and locks the container.
 
-Shipment details are editable per container with invoice/booking, vessel, port, sailing date, ETA, warehouse and notes; the tracking number stays in the summary header. The old browser-local Vendor updates key is still read for migration and remains untouched by reset, but legacy update rows are no longer shown in the tracking panel.
+Shipment details are editable per container with invoice/booking, vessel, port, sailing date, ETA, warehouse and notes; the tracking number stays in the summary header. The old browser-local Vendor updates key is still read for migration, but legacy update rows are no longer shown anywhere in the Containers view.
 
 Documents are attached per container with an **Attach file** control. The list records file name, type and date for packing list, invoice or booking confirmation. Nothing is uploaded, read, OCR'd or parsed.
-
-The header’s **Reset demo data** clears only the merged Containers localStorage key. It does not touch the old Vendor updates key.
 
 ### Container naming
 
@@ -83,7 +81,7 @@ PO rows also get two planning tags: **Ariel needs to plan** when an unplanned li
 
 ## Rules and assumptions
 
-- **AS_OF is fixed at 2026-11-02** (the export date) for every “days late / in N days” calculation. The UI shows “Data as of 2 Nov 2026”.
+- **AS_OF is fixed at 2026-11-02** (the export date) for every “days late / in N days” calculation.
 - **Segment** values are still derived for diagnostics, but the segment dropdown has been removed because all live shipments are imports; every view shows all segments by default:
   - Import = FOB matches `ningbo|xiamen|shenzhen|shanghai|qingdao|guangzhou|yantian|dalian` (case-insensitive)
   - Domestic/custom = `VendorID` is `ACH` or FOB is `LA`
@@ -103,7 +101,7 @@ PO rows also get two planning tags: **Ariel needs to plan** when an unplanned li
 
 ## Persistence
 
-Merged demo state is stored under `ariel.containers.v1`: containers, plans, simulated receipts/quantities, PO confirmations and ready dates, shipment details, document metadata and container activity history. The old `ariel.vendorUpdates.v1` key is read for migration and is left untouched by **Reset demo data**.
+Merged demo state is stored under `ariel.containers.v1`: containers, plans, simulated receipts/quantities, PO confirmations and ready dates, shipment details, document metadata and container activity history. The old `ariel.vendorUpdates.v1` key is read for migration only.
 
 ## Code layout
 
