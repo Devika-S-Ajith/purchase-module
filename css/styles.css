@@ -876,10 +876,21 @@ button.s:not(.p):hover {
   scrollbar-gutter: stable;
 }
 
-.planner-line-card {
-  padding: 8px 10px;
+.blk.planner-line-card {
+  margin-top: 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(72, 42, 32, 0.05);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.blk.planner-line-card + .blk.planner-line-card {
+  margin-top: 8px;
+}
+
+.blk.planner-line-card:hover {
+  border-color: var(--acc);
 }
 
 .planner-line-head {
@@ -1038,6 +1049,7 @@ button.s:not(.p):hover {
   min-height: 220px;
   max-height: 60vh;
   margin-top: 0;
+  padding: 10px;
   background: var(--bg);
 }
 
@@ -1088,6 +1100,24 @@ button.s:not(.p):hover {
 .blk.l2 {
   cursor: default;
   background: var(--bg);
+}
+
+.blk.planner-assigned-item {
+  margin-top: 0;
+  padding: 9px 11px;
+  border-left: 4px solid var(--acc);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(72, 42, 32, 0.08);
+  line-height: 1.5;
+}
+
+.blk.planner-assigned-item + .blk.planner-assigned-item {
+  margin-top: 8px;
+}
+
+.blk.planner-assigned-item:hover {
+  border-color: var(--acc);
 }
 
 .container-summary {

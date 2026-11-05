@@ -2290,7 +2290,7 @@
 
   function containerRecordLabel(record) {
     if (record.kind === 'planner') return record.container.name || record.container.id;
-    return record.group.isContainer ? `Container ${record.group.label}` : `Tracking no. ${record.group.label}`;
+    return `Container ${record.group.label}`;
   }
 
   function containerRecordType(record) {
@@ -3044,7 +3044,7 @@
             const line = lineById.get(assignment.lineId);
             const block = blockLabels.get(`${container.id}:${index}`) || assignment.block || 'B1';
             return `
-              <div class="blk l2">
+              <div class="blk l2 planner-assigned-item">
                 ${renderTag('', block)} <b class="mono">${esc(line ? line.itemId : '—')}</b>
                 ${line && line.poRef ? `<span class="sub">· ${esc(line.poRef.po)}</span>` : ''}
                 · ${formatNumber(assignment.units)} items
@@ -3179,7 +3179,7 @@
         <div class="ship-group-head">
           <button class="ship-group-open" data-action="open-container:${attr(group.key)}">
             <span class="ship-group-name">
-              <b>${esc(group.isContainer ? `Container ${group.label}` : `Tracking no. ${group.label}`)}</b>
+              <b>Container ${esc(group.label)}</b>
               ${trackingTag}
               <span class="sub">${formatNumber(group.receipts.length)} vendor shipment${group.receipts.length === 1 ? '' : 's'} · ${formatNumber(pos.length)} PO${pos.length === 1 ? '' : 's'}${vendors.length ? ` · ${esc(vendors.slice(0, 2).join(', '))}${vendors.length > 2 ? ` +${vendors.length - 2}` : ''}` : ''}</span>
             </span>
@@ -3293,7 +3293,7 @@
 
     return `
       <div class="row" style="margin-bottom:8px">
-        <span class="sub">${formatNumber(allRows.length)} container/tracking row${allRows.length === 1 ? '' : 's'} · ${formatNumber(shared)} shared · ${formatNumber(receiptsOnPage)} vendor shipment${receiptsOnPage === 1 ? '' : 's'} on this page</span>
+        <span class="sub">${formatNumber(allRows.length)} container${allRows.length === 1 ? '' : 's'} · ${formatNumber(shared)} shared · ${formatNumber(receiptsOnPage)} vendor shipment${receiptsOnPage === 1 ? '' : 's'} on this page</span>
         <span class="row" style="gap:6px">
           <button class="s" data-action="containers-expand-all"${pageRows.some((row) => row.kind === 'real') ? '' : ' disabled'}>Expand all</button>
           <button class="s" data-action="containers-collapse-all"${state.expandedContainerGroups.size ? '' : ' disabled'}>Collapse all</button>
